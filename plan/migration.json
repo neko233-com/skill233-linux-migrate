@@ -1,0 +1,11 @@
+{
+  "packages": ["curl"],
+  "files": [
+    { "src": "files/hello.conf", "dest": "/etc/hello-migrate.conf", "contains": "migrated" }
+  ],
+  "groups": ["appdemo"],
+  "users": [{ "name": "appdemo", "group": "appdemo" }],
+  "cron": [{ "expr": "*/10 * * * *", "cmd": "/opt/app/collect.sh" }],
+  "commands": ["curl"],
+  "per_distro": {}
+}

@@ -1,0 +1,9 @@
+# 运行产物
+out/
+report/
+snapshot/
+compose.generated.yml
+
+# Python
+__pycache__/
+*.pyc
