@@ -17,11 +17,12 @@ ssh root@源服务器 'bash -s' < scripts/snapshot.sh
 
 `plan/migration.json`：
 
-- `packages`：目标机器要确保存在的包（原样复刻时可直接放全量清单，再裁剪）。
+- `packages`：目标机器要确保存在的包（原样复刻时可直接放全量清单，再裁剪）。RHEL 9 minimal 装 `curl` 需 `--allowerasing`（脚本会自动重试）。
 - `files`：要落盘的配置（`src` 相对 plan/，`dest` 容器内路径，`contains` 必含文本）。
 - `groups` / `users`：`users[].group` 为所属组。
-- `cron`：`expr` 五段表达式 + `cmd`；apply 阶段写入 `/etc/cron.d/linuxmig`。
+- `cron`：`expr` 五段表达式 + `cmd`；apply 按系写入 `/etc/cron.d` 或 `/etc/crontabs/root`。
 - `commands`：`command -v` 可发现的二进制名。
+- `checks`：容器内执行的校验命令，用于验证程序层（如 `nginx -T` 里能否看到你的 server 块）。
 - `per_distro`：发行版专属覆盖，键名同 matrix.json。
 
 ## 3. 跑矩阵

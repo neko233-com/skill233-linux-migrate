@@ -90,13 +90,14 @@ def merge_plan(distro_name: str, plan: dict) -> dict:
         "users": list(plan.get("users", [])),
         "cron": list(plan.get("cron", [])),
         "commands": list(plan.get("commands", [])),
+        "checks": list(plan.get("checks", [])),
     }
     ov = plan.get("per_distro", {}).get(distro_name, {})
     # packages：追加去重；其余列表：有覆盖则整体替换
     for p in ov.get("packages", []):
         if p not in merged["packages"]:
             merged["packages"].append(p)
-    for k in ("files", "groups", "users", "cron", "commands"):
+    for k in ("files", "groups", "users", "cron", "commands", "checks"):
         if k in ov:
             merged[k] = ov[k]
     return merged
@@ -124,6 +125,10 @@ def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR) -> Pa
     for i, c in enumerate(merged["cron"]):
         env_lines.append(f'CRON{i}_EXPR={shq(c["expr"])}')
         env_lines.append(f'CRON{i}_CMD={shq(c["cmd"])}')
+
+    for i, c in enumerate(merged.get("checks", [])):
+        env_lines.append(f'CHECK{i}_NAME={shq(c["name"])}')
+        env_lines.append(f'CHECK{i}_CMD={shq(c["cmd"])}')
 
     # write_bytes 避免 Windows 下 \n 被翻译成 \r\n（容器内 sh 会吃到 \r）
     (d / "apply.env").write_bytes(("\n".join(env_lines) + "\n").encode("utf-8"))

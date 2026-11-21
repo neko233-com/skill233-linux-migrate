@@ -42,8 +42,9 @@ python --version                                        # 3.10+，无第三方�
 独立脚本：`python scripts/plan_from_snapshot.py` 把 `snapshot/source.txt` 转成 `plan/migration.json`（包/用户/cron 自动带出）。
 
 指定发行版子集：`python scripts/matrix.py all --only rocky-9,ubuntu-noble`。
-用自定义计划：`--plan examples/prod/plan.json`（文件相对计划目录解析）。
-示例场景：`examples/prod/`（nginx 站点 + deploy 用户 + 备份 cron）。
+用自定义计划：`--plan examples/deep/plan.json`（文件相对计划目录解析）。
+示例场景：`examples/prod/`（最小 nginx 站点）；`examples/deep/`（双用户组 + 双 cron + 三系 nginx 路径 +
+`nginx -T` 程序层校验，已实测 7 发行版全绿）；`examples/negative/`（故意写错路径与缺失命令，用于验证 FAIL 与退出码）。
 
 ## matrix.json（选哪些发行版）
 
@@ -76,6 +77,9 @@ python --version                                        # 3.10+，无第三方�
   "groups": ["appdemo"],
   "cron": [{ "expr": "*/10 * * * *", "cmd": "/opt/app/collect.sh" }],
   "commands": ["curl"],
+  "checks": [
+    { "name": "nginx-conf-loaded", "cmd": "nginx -T 2>/dev/null | grep -q 'demo.example.com'" }
+  ],
   "per_distro": {
     "rocky-9": { "packages": ["curl"] }
   }
@@ -85,15 +89,17 @@ python --version                                        # 3.10+，无第三方�
 - `packages`：通用包清单；`per_distro.<name>` 按发行版合并覆盖（追加/替换见下）。
 - `files[].src` 相对 `plan/` 目录；`dest` 为容器内目标路径；`contains` 为落盘后必须出现的文本（可省略）。
 - `commands`：`command -v` 级别的可执行性校验。
-- `per_distro` 支持键：`packages`（合并去重）、`files`、`users`、`groups`、`cron`、`commands`。
+- `checks`：容器内 `sh -c` 执行的任意校验命令，退出 0 记 PASS；用来验程序层（如 `nginx -T` 确认配置真被加载）。
+- `per_distro` 支持键：`packages`（合并去重）、`files`、`users`、`groups`、`cron`、`commands`、`checks`。
 
 ## 校验项类型（guest/verify.sh 自动判定）
 
-- `pkg:<name>`：包已安装（dpkg -l / rpm -qa / apk info 自动适配）
+- `pkg:<name>`：包已安装（dpkg / rpm / apk 自动适配）
 - `file:<dest>`：文件存在且含 `contains` 文本
 - `cmd:<command>`：命令可执行
-- `user:<name>` / `group:<name>`：存在
-- `cron:<expr>`：`/etc/cron.d/linuxmig` 中表达式与命令均在
+- `user:<name>` / `group:<name>`：存在（直接读 /etc/passwd、/etc/group，兼容 busybox）
+- `cron:<expr>`：cron 定义落在实际生效路径（RHEL/Debian 为 `/etc/cron.d`，Alpine 为 `/etc/crontabs/root`）
+- `check:<name>`：自定义命令通过
 
 ## 判读报告
 
@@ -103,9 +109,11 @@ python --version                                        # 3.10+，无第三方�
 
 ## 重要限制（不要过度解读）
 
-- 容器**无 systemd、无内核、无真实网卡**：本技能只验证「包能装上、配置能落对、命令能找到、用户/cron 定义落盘」这一层；服务真起不起得来、端口通不通，不在此验证范围。需要 systemd 行为时见 `references/workflow.md` 的 systemd-in-docker 方案。
-- cron 在容器内只验证任务定义写入 `/etc/cron.d/linuxmig`；真实服务器上由 cron 守护进程加载执行。
+- 容器**无 systemd、无内核、无真实网卡**：本技能只验证「包能装上、配置能落对、命令能找到、用户/cron 定义落盘」这一层；服务可否真正常驻、端口通不通，不在此验证范围。需要 systemd 行为时见 `references/workflow.md` 的 systemd-in-docker 方案。
+- 想验证「程序真的加载了配置」用 `checks`（如 `nginx -T | grep`）；只靠 `file:` 校验只能证明文件落盘，不能证明被加载。
+- cron 在容器内只验证定义写入实际生效路径（Alpine 为 `/etc/crontabs/root`，其余为 `/etc/cron.d`）；真实服务器上由 cron 守护进程加载执行。
 - 安装需要容器出网（apt/dnf/apk 更新源）；离线环境先在 `matrix.json` 里关闭安装类检查。
+- RHEL 9 minimal 预装 `curl-minimal`，装 `curl` 需 `--allowerasing`（脚本已自动重试）。
 - CentOS 7/8 已 EOL，官方仓库失效，矩阵用 CentOS Stream 9 代表 CentOS 系；迁移到老 CentOS 的注意事项见 `references/distro-matrix.md`。
 
 ## 参考文件

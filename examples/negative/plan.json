@@ -1,0 +1,17 @@
+{
+  "packages": ["curl", "nginx"],
+  "files": [
+    { "src": "prod.conf", "dest": "/etc/nginx/conf.d/prod.conf", "contains": "server_name" }
+  ],
+  "groups": ["deploy"],
+  "users": [{ "name": "deploy", "group": "deploy" }],
+  "cron": [{ "expr": "0 3 * * *", "cmd": "/opt/backup.sh" }],
+  "commands": ["curl", "nginx", "definitely-missing-binary"],
+  "per_distro": {
+    "debian-bookworm": {
+      "files": [
+        { "src": "prod.conf", "dest": "/etc/nginx/wrong-path/prod.conf", "contains": "server_name" }
+      ]
+    }
+  }
+}

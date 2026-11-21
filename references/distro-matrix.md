@@ -47,6 +47,57 @@
 5. **CentOS 7/8 EOL**：官方镜像仓库 404，存量迁移先换 vault.centos.org 或内部镜像；新机器直接选 Rocky/Alma/Stream 9。
 6. **glibc / 编译产物**：预编译二进制在不同 glibc 版本间不通用，矩阵只验证包与配置，不验证二进制运行。
 
+## 实测踩到的坑（本技能已在容器内复现并处理）
+
+### RHEL 9 系 `curl-minimal` 冲突
+
+Rocky/Alma/CentOS Stream 9 的 minimal 镜像预装 `curl-minimal`。执行 `dnf install curl nginx`
+会报执行计划冲突，**整个事务失败**（连 nginx 一起装不上）：
+
+```
+package curl-minimal-... from @System conflicts with curl provided by curl-...
+```
+
+处理：`dnf install -y --allowerasing`（替换冲突包）。本技能 `guest/apply.sh` 在 dnf 失败后
+自动用 `--allowerasing` 重试一次，并把日志留在容器 `/tmp/linuxmig-pkg.log`。
+
+### Alpine 的 nginx 配置位置是 `http.d`，不是 `conf.d`
+
+Alpine 3.20 的 nginx 默认配置：
+
+- `include /etc/nginx/conf.d/*.conf;` —— 在 **main context**，只能放 `upstream`/`map` 这类，
+  放 `server { }` 会直接报 `"server" directive is not allowed here`，并让 `nginx -t` 整体失败。
+- `include /etc/nginx/http.d/*.conf;` —— 在 **http context**，`server` 块必须放这里。
+
+对照表：
+
+| 系 | server 块放置位置 | server 块之外 |
+| --- | --- | --- |
+| Debian / Ubuntu | `/etc/nginx/sites-enabled/*` | — |
+| RHEL 系（Rocky/Alma/Stream） | `/etc/nginx/conf.d/*.conf`（http 上下文） | — |
+| Alpine | `/etc/nginx/http.d/*.conf` | `/etc/nginx/conf.d` 仅 main 上下文 |
+
+用 `per_distro.files` 分别指定 `dest` 即可一份计划覆盖三系。
+
+### Alpine cron 目录不同
+
+Alpine 走 busybox crond，读 `/etc/crontabs/<user>`（**5 段，无用户字段**）；
+RHEL/Debian/Ubuntu 走 `/etc/cron.d/<name>`（**6 段，含用户字段**）。
+`guest/apply.sh` 按包管理器自动选路径，并把实际路径写入 `cron_path` 供 `verify.sh` 复用。
+
+## 程序层校验（checks）
+
+只校验"文件落盘"无法证明目标程序真的加载了配置。用 `checks` 补这一层：
+
+```json
+"checks": [
+  { "name": "nginx-conf-loaded", "cmd": "nginx -T 2>/dev/null | grep -q 'demo.example.com'" }
+]
+```
+
+容器内以 `sh -c` 执行，退出码 0 记 PASS。`nginx -T`（转储全部实际加载的配置）比 `nginx -t`
+（仅语法检查）更能证明路径正确——`nginx -t` 对未被 include 的文件不会报错。
+
 ## per_distro 覆盖写法
 
 `plan/migration.json` 中按发行版名（与 matrix.json 的 `name` 一致）覆盖：

@@ -1,0 +1,49 @@
+{
+  "packages": ["curl", "nginx"],
+  "files": [
+    { "src": "prod.conf", "dest": "/etc/nginx/conf.d/prod.conf", "contains": "server_name" },
+    { "src": "app.env", "dest": "/etc/app/app.env", "contains": "APP_MODE=prod" }
+  ],
+  "groups": ["deploy", "apprun"],
+  "users": [
+    { "name": "deploy", "group": "deploy" },
+    { "name": "apprun", "group": "apprun" }
+  ],
+  "cron": [
+    { "expr": "0 3 * * *", "cmd": "/opt/backup.sh" },
+    { "expr": "*/5 * * * *", "cmd": "/opt/app/health.sh" }
+  ],
+  "commands": ["curl", "nginx"],
+  "checks": [
+    {
+      "name": "nginx-conf-loaded",
+      "cmd": "nginx -T 2>/dev/null | grep -q 'demo.example.com'"
+    }
+  ],
+  "per_distro": {
+    "debian-bookworm": {
+      "files": [
+        { "src": "prod.conf", "dest": "/etc/nginx/sites-enabled/prod.conf", "contains": "server_name" },
+        { "src": "app.env", "dest": "/etc/app/app.env", "contains": "APP_MODE=prod" }
+      ]
+    },
+    "ubuntu-noble": {
+      "files": [
+        { "src": "prod.conf", "dest": "/etc/nginx/sites-enabled/prod.conf", "contains": "server_name" },
+        { "src": "app.env", "dest": "/etc/app/app.env", "contains": "APP_MODE=prod" }
+      ]
+    },
+    "ubuntu-jammy": {
+      "files": [
+        { "src": "prod.conf", "dest": "/etc/nginx/sites-enabled/prod.conf", "contains": "server_name" },
+        { "src": "app.env", "dest": "/etc/app/app.env", "contains": "APP_MODE=prod" }
+      ]
+    },
+    "alpine-320": {
+      "files": [
+        { "src": "prod.conf", "dest": "/etc/nginx/http.d/prod.conf", "contains": "server_name" },
+        { "src": "app.env", "dest": "/etc/app/app.env", "contains": "APP_MODE=prod" }
+      ]
+    }
+  }
+}
