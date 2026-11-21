@@ -89,6 +89,93 @@ while true; do
   i=$((i + 1))
 done
 
+# --- 业务目录树 ---
+i=0
+while true; do
+  eval "dest=\${DIR${i}_DEST:-}"
+  [ -z "$dest" ] && break
+  if [ -d "$dest" ]; then
+    n=$(find "$dest" -type f 2>/dev/null | wc -l | tr -d ' ')
+    pass "dir:$dest" "exists, $n files"
+  else
+    fail "dir:$dest" "missing"
+  fi
+  i=$((i + 1))
+done
+
+# --- systemd unit：有 systemd-analyze 才做真正语法校验 ---
+i=0
+while true; do
+  eval "uname_=\${UNIT${i}_NAME:-}"
+  [ -z "$uname_" ] && break
+  eval "udest=\${UNIT${i}_DEST:-}"
+  if [ ! -f "$udest" ]; then
+    fail "unit:$uname_" "missing at $udest"
+  elif command -v systemd-analyze >/dev/null 2>&1; then
+    if systemd-analyze verify "$udest" >/tmp/unit-verify.log 2>&1; then
+      pass "unit:$uname_" "systemd-analyze verify ok"
+    else
+      fail "unit:$uname_" "systemd-analyze verify failed: $(tail -1 /tmp/unit-verify.log)"
+    fi
+  elif grep -q '^\[Service\]' "$udest" 2>/dev/null \
+       && grep -q '^ExecStart=' "$udest" 2>/dev/null \
+       && grep -q '^\[Unit\]' "$udest" 2>/dev/null; then
+    # 镜像无 systemd-analyze：退化为结构校验，并明确标注（Alpine 用 openrc，需转换）
+    if [ -f /sbin/openrc-run ] || command -v rc-service >/dev/null 2>&1; then
+      pass "unit:$uname_" "structural ok; WARNING: openrc host, needs openrc script instead of unit"
+    else
+      pass "unit:$uname_" "structural ok (no systemd-analyze in image)"
+    fi
+  else
+    fail "unit:$uname_" "not a valid unit (missing [Unit]/[Service]/ExecStart=)"
+  fi
+  i=$((i + 1))
+done
+
+# --- 业务服务：进程存活 + 端口由该进程自己持有（避免被旧进程占端口造成假通过）---
+listening_inodes() {
+  p="$1"
+  ph=$(printf "%04X" "$p" 2>/dev/null) || return 1
+  awk -v pat="$ph" 'FNR>1 { split($2,a,":"); if (toupper(a[2])==pat && $4=="0A") print $10 }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u
+}
+
+pid_owns_port() {
+  pid="$1"; p="$2"
+  inodes=$(listening_inodes "$p")
+  [ -z "$inodes" ] && return 1
+  for fd in /proc/"$pid"/fd/*; do
+    l=$(readlink "$fd" 2>/dev/null) || continue
+    case "$l" in
+      "socket:["*"]")
+        ino=${l#socket:[}; ino=${ino%]}
+        echo "$inodes" | grep -qx "$ino" && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+i=0
+while true; do
+  eval "sname=\${SVC${i}_NAME:-}"
+  [ -z "$sname" ] && break
+  eval "sport=\${SVC${i}_PORT:-}"
+  pid=""
+  [ -f "/tmp/svc-$sname.pid" ] && pid=$(cat "/tmp/svc-$sname.pid")
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    fail "svc:$sname" "process dead | $(tail -2 "/tmp/svc-$sname.log" 2>/dev/null | tr '\n' ' ')"
+  elif [ -n "$sport" ] && ! pid_owns_port "$pid" "$sport"; then
+    if [ -n "$(listening_inodes "$sport")" ]; then
+      fail "svc:$sname" "tcp/$sport is LISTEN but not owned by pid $pid (stale/another process)"
+    else
+      fail "svc:$sname" "process alive but tcp/$sport not LISTEN | $(tail -2 "/tmp/svc-$sname.log" 2>/dev/null | tr '\n' ' ')"
+    fi
+  else
+    pass "svc:$sname" "pid $pid owns tcp/${sport:-n/a}"
+  fi
+  i=$((i + 1))
+done
+
 # --- 自定义命令校验：程序层（如 nginx -T 是否真的加载了配置）---
 i=0
 while true; do

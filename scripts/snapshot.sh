@@ -48,6 +48,27 @@ awk -F: '$3>=1000 || $1=="root"{print $1":"$3}' /etc/passwd | tee -a "$OUT_DIR/s
 echo "== GROUPS ==" | tee -a "$OUT_DIR/source.txt"
 getent group | awk -F: '$3>=1000{print $1}' | tee -a "$OUT_DIR/source.txt"
 
+# --- 业务服务器目录（默认约定 /server）---
+echo "" | tee -a "$OUT_DIR/source.txt"
+echo "== BUSINESS TREE (/server) ==" | tee -a "$OUT_DIR/source.txt"
+if [ -d /server ]; then
+  du -sh /server 2>/dev/null | tee -a "$OUT_DIR/source.txt"
+  find /server -maxdepth 3 \( -type f -o -type l \) 2>/dev/null | head -300 | tee -a "$OUT_DIR/source.txt"
+else
+  echo "no /server" | tee -a "$OUT_DIR/source.txt"
+fi
+
+# --- 业务二进制的 libc 下限（迁移最容易踩的坑）---
+echo "" | tee -a "$OUT_DIR/source.txt"
+echo "== BINARY LIBC REQUIREMENTS ==" | tee -a "$OUT_DIR/source.txt"
+echo "host_glibc: $(ldd --version 2>/dev/null | head -1)" | tee -a "$OUT_DIR/source.txt"
+for b in $(find /server -maxdepth 3 -type f -perm -u+x 2>/dev/null | head -20); do
+  case "$b" in *.sh|*.yaml|*.yml|*.pem|*.env|*.conf|*.json) continue ;; esac
+  echo "-- $b" | tee -a "$OUT_DIR/source.txt"
+  ldd "$b" 2>/dev/null | grep -E 'not found|GLIBC' | tee -a "$OUT_DIR/source.txt"
+  strings "$b" 2>/dev/null | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3 | tee -a "$OUT_DIR/source.txt"
+done
+
 # --- 防火墙 ---
 echo "" | tee -a "$OUT_DIR/source.txt"
 echo "== FIREWALL ==" | tee -a "$OUT_DIR/source.txt"

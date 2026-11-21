@@ -1,0 +1,32 @@
+{
+  "packages": ["nginx", "curl"],
+  "dirs": [
+    { "src": "files/server", "dest": "/server" }
+  ],
+  "files": [
+    { "src": "files/nginx-business.conf", "dest": "/etc/nginx/conf.d/business.conf" }
+  ],
+  "units": [
+    { "src": "files/proxysss.service", "name": "proxysss.service", "dest": "/etc/systemd/system/proxysss.service" }
+  ],
+  "services": [
+    {
+      "name": "web",
+      "start": "nginx -g 'daemon off;'",
+      "stop": "nginx -s stop >/dev/null 2>&1 || pkill -f nginx",
+      "port": 8080,
+      "wait": 3
+    }
+  ],
+  "checks": [
+    { "name": "server-tree", "cmd": "test -f /server/proxysss/proxysss.yaml && test -x /server/proxysss/proxysss" },
+    { "name": "business-http", "cmd": "curl -sf http://127.0.0.1:8080/ | grep -q 'business ok'" }
+  ],
+  "per_distro": {
+    "alpine-320": {
+      "files": [
+        { "src": "files/nginx-business.conf", "dest": "/etc/nginx/http.d/business.conf" }
+      ]
+    }
+  }
+}

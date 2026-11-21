@@ -34,11 +34,6 @@ if [ -n "${PKGS:-}" ] && [ "$PM" != "none" ]; then
            yum install -y --allowerasing $PKGS >>"$PKG_LOG" 2>&1 ;;
     esac
   }
-  # 二次校验：至少命令可执行层面不静默失败
-  if [ -n "$(tail -5 "$PKG_LOG" 2>/dev/null | grep -i 'error\|conflict\|cannot' || true)" ]; then
-    echo "[apply] 包安装可能有异常，日志尾部："
-    tail -5 "$PKG_LOG"
-  fi
 fi
 
 # --- 落配置文件 ---
@@ -51,7 +46,31 @@ while true; do
   i=$((i + 1))
 done
 
-# --- 组/用户存在性检查（awk 直接读文件，兼容 busybox 无 getent 的场景）---
+# --- 业务目录树（tar 解包，保留结构）---
+i=0
+while true; do
+  eval "dest=\${DIR${i}_DEST:-}"
+  [ -z "$dest" ] && break
+  mkdir -p "$dest"
+  tar -xf "$PLAN_DIR/dirs/$i.tar" -C "$dest" 2>/dev/null || \
+    echo "[apply] 解包失败: $PLAN_DIR/dirs/$i.tar -> $dest"
+  i=$((i + 1))
+done
+
+# --- systemd unit 文件落盘 ---
+i=0
+while true; do
+  eval "uname_=\${UNIT${i}_NAME:-}"
+  [ -z "$uname_" ] && break
+  eval "udest=\${UNIT${i}_DEST:-}"
+  if [ -n "$udest" ]; then
+    mkdir -p "$(dirname "$udest")"
+    cp "$PLAN_DIR/files/unit$i" "$udest" 2>/dev/null || true
+  fi
+  i=$((i + 1))
+done
+
+# --- 组/用户（awk 读文件，兼容 busybox 无 getent）---
 has_group() { awk -F: -v g="$1" '$1==g{f=1} END{exit !f}' /etc/group 2>/dev/null; }
 has_user()  { awk -F: -v u="$1" '$1==u{f=1} END{exit !f}' /etc/passwd 2>/dev/null; }
 
@@ -89,8 +108,79 @@ for u in ${USERLIST:-}; do
   ensure_user "$name" "$grp"
 done
 
+# --- 业务服务启动（后台常驻，日志/pid 落 /tmp）---
+listening_inodes() {
+  p="$1"
+  ph=$(printf "%04X" "$p" 2>/dev/null) || return 1
+  awk -v pat="$ph" 'FNR>1 { split($2,a,":"); if (toupper(a[2])==pat && $4=="0A") print $10 }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u
+}
+
+# 反查真正持有监听端口的 pid（启动脚本会 fork/exec，记录的 $! 未必是 listener）
+find_port_owner() {
+  port="$1"
+  inodes=$(listening_inodes "$port")
+  [ -z "$inodes" ] && return 1
+  for pd in /proc/[0-9]*; do
+    for fd in "$pd"/fd/*; do
+      l=$(readlink "$fd" 2>/dev/null) || continue
+      case "$l" in
+        "socket:["*"]")
+          ino=${l#socket:[}; ino=${ino%]}
+          if echo "$inodes" | grep -qx "$ino"; then
+            echo "${pd#/proc/}"; return 0
+          fi ;;
+      esac
+    done
+  done
+  return 1
+}
+
+i=0
+while true; do
+  eval "sname=\${SVC${i}_NAME:-}"
+  [ -z "$sname" ] && break
+  eval "sstart=\${SVC${i}_START:-}"
+  eval "sstop=\${SVC${i}_STOP:-}"
+  eval "sport=\${SVC${i}_PORT:-}"
+  eval "swait=\${SVC${i}_WAIT:-5}"
+
+  [ -n "$sstop" ] && sh -c "$sstop" >/dev/null 2>&1
+  rm -f "/tmp/svc-$sname.pid"
+
+  # 生成启动脚本（避免引号地狱；脚本自行记录 pid，随后 exec 保持同一 pid）
+  script="/tmp/svc-$sname.sh"
+  {
+    echo '#!/bin/sh'
+    echo "echo \$\$ > /tmp/svc-$sname.pid"
+    echo "$sstart"
+  } > "$script"
+  chmod +x "$script"
+
+  # setsid -f 优先（脱离会话），busybox 无 setsid 时退回 nohup
+  if setsid -f true >/dev/null 2>&1; then
+    setsid -f "$script" >"/tmp/svc-$sname.log" 2>&1
+  elif command -v setsid >/dev/null 2>&1; then
+    setsid "$script" >"/tmp/svc-$sname.log" 2>&1 &
+  else
+    nohup "$script" >"/tmp/svc-$sname.log" 2>&1 &
+  fi
+
+  # 等端口就绪，并把 pid 校正为真正的 listener
+  n=0
+  while [ "$n" -lt "$swait" ]; do
+    sleep 1
+    n=$((n + 1))
+    if [ -n "$sport" ] && [ -n "$(listening_inodes "$sport")" ]; then
+      owner=$(find_port_owner "$sport")
+      [ -n "$owner" ] && echo "$owner" > "/tmp/svc-$sname.pid"
+      break
+    fi
+  done
+  i=$((i + 1))
+done
+
 # --- cron：全量重建，保证重复 apply 幂等 ---
-# busybox/Alpine 走 /etc/crontabs/root；其余发行版写 /etc/cron.d/linuxmig
 CRON_FILE=/etc/cron.d/linuxmig
 if [ "$PM" = "apk" ] || { [ -d /etc/crontabs ] && [ ! -d /etc/cron.d ]; }; then
   CRON_FILE=/etc/crontabs/root
@@ -114,7 +204,6 @@ if [ "$have_cron" = 1 ]; then
     eval "expr=\${CRON${i}_EXPR:-}"
     [ -z "$expr" ] && break
     eval "cmd=\${CRON${i}_CMD:-}"
-    # /etc/cron.d 需要 6 段（含用户）；crontabs 用户即文件名，写 5 段
     case "$CRON_FILE" in
       /etc/crontabs/*) echo "$expr $cmd" >> "$CRON_FILE" ;;
       *)               echo "$expr root $cmd" >> "$CRON_FILE" ;;

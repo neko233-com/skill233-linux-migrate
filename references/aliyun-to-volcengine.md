@@ -27,7 +27,11 @@
    - nginx/Apache 配置目录差异（见 `distro-matrix.md`）。
    - cron 任务全部迁入 `/etc/cron.d`。
    - 业务用户/组重建，UID 不必一致。
+   - **业务二进制**：`/server` 下的产物要核对 glibc 下限（`ldd` + `strings | grep GLIBC_`）。
+     实测 proxysss v1.3.9（Ubuntu 24.04 编译，要求 GLIBC_2.38/2.39）在 Debian 12 / Ubuntu 22.04 / Alma/Rocky 9 上
+     全部起不来，Alpine(musl) 直接 not found。目标 OS 必须与构建环境 glibc 对齐，或改 musl 静态产物，详见 `business-stack.md`。
 3. `python scripts/matrix.py all` 出报告，FAIL 项按报告修计划。
+   业务栈计划要带 `dirs`（`/server`）、`units`、`services`（起进程 + 端口归属校验），只验包和文件会漏掉「起不来」。
 
 ## 3. 数据迁移（文件级，跨云不做整盘搬运）
 

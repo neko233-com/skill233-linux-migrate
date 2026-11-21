@@ -1,0 +1,14 @@
+config_version: 1
+http:
+  plain_bind: 0.0.0.0:80
+  tls_bind: 0.0.0.0:443
+admin:
+  enabled: true
+  bind: 127.0.0.1:7777
+services:
+  static_sites:
+    - host: gateway.local
+      root: /server/web
+monitoring:
+  enabled: true
+  path: /metrics

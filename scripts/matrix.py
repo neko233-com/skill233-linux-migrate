@@ -86,6 +86,9 @@ def merge_plan(distro_name: str, plan: dict) -> dict:
     merged = {
         "packages": list(plan.get("packages", [])),
         "files": list(plan.get("files", [])),
+        "dirs": list(plan.get("dirs", [])),
+        "units": list(plan.get("units", [])),
+        "services": list(plan.get("services", [])),
         "groups": list(plan.get("groups", [])),
         "users": list(plan.get("users", [])),
         "cron": list(plan.get("cron", [])),
@@ -97,10 +100,26 @@ def merge_plan(distro_name: str, plan: dict) -> dict:
     for p in ov.get("packages", []):
         if p not in merged["packages"]:
             merged["packages"].append(p)
-    for k in ("files", "groups", "users", "cron", "commands", "checks"):
+    for k in ("files", "dirs", "units", "services", "groups", "users", "cron", "commands", "checks"):
         if k in ov:
             merged[k] = ov[k]
     return merged
+
+
+def make_tar(src: Path, tar_path: Path):
+    """把 src 目录内容（保留相对结构）打成 tar；文件统一 0755 便于直接执行。"""
+    import tarfile
+    tar_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path, "w") as tf:
+        for f in sorted(src.rglob("*")):
+            if not f.is_file():
+                continue
+            ti = tf.gettarinfo(str(f), arcname=f.relative_to(src).as_posix())
+            ti.mode = 0o755
+            ti.uid = ti.gid = 0
+            ti.uname = ti.gname = "root"
+            with open(f, "rb") as fh:
+                tf.addfile(ti, fh)
 
 
 def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR) -> Path:
@@ -121,6 +140,29 @@ def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR) -> Pa
         (files_d / str(i)).write_bytes(src.read_bytes())
         env_lines.append(f'FILE{i}_DEST={shq(f["dest"])}')
         env_lines.append(f'FILE{i}_CONTAINS={shq(f.get("contains", ""))}')
+
+    # 目录树：打成 tar，容器内解包（保留结构，文件 0755）
+    for i, dd in enumerate(merged.get("dirs", [])):
+        src = Path(dd["src"]) if Path(dd["src"]).is_absolute() else base_dir / dd["src"]
+        if not src.exists():
+            raise SystemExit(f"dirs[{i}] 源目录不存在: {src}")
+        make_tar(src, d / "dirs" / f"{i}.tar")
+        env_lines.append(f'DIR{i}_DEST={shq(dd["dest"])}')
+
+    # systemd unit 文件
+    for i, u in enumerate(merged.get("units", [])):
+        src = base_dir / u["src"]
+        (files_d / f"unit{i}").write_bytes(src.read_bytes())
+        env_lines.append(f'UNIT{i}_NAME={shq(u.get("name", Path(u["src"]).name))}')
+        env_lines.append(f'UNIT{i}_DEST={shq(u["dest"])}')
+
+    # 业务服务（起进程 + 监听端口）
+    for i, s in enumerate(merged.get("services", [])):
+        env_lines.append(f'SVC{i}_NAME={shq(s["name"])}')
+        env_lines.append(f'SVC{i}_START={shq(s["start"])}')
+        env_lines.append(f'SVC{i}_STOP={shq(s.get("stop", ""))}')
+        env_lines.append(f'SVC{i}_PORT={shq(str(s.get("port", "")))}')
+        env_lines.append(f'SVC{i}_WAIT={shq(str(s.get("wait", 5)))}')
 
     for i, c in enumerate(merged["cron"]):
         env_lines.append(f'CRON{i}_EXPR={shq(c["expr"])}')
@@ -185,6 +227,11 @@ def cmd_apply(args):
     matrix = load_json(ROOT / "matrix.json")
     plan = load_plan(args)
     plan_base = (ROOT / args.plan).parent if getattr(args, "plan", None) else PLAN_DIR
+    # 业务目录可能放在仓库外（真实 /server 副本），src_root 允许绝对/相对仓库根
+    if plan.get("src_root"):
+        plan_base = Path(plan["src_root"])
+        if not plan_base.is_absolute():
+            plan_base = ROOT / plan_base
     distros = enabled_distros(matrix, set(parse_only(args)))
     for d in distros:
         name = d["name"]
@@ -277,6 +324,12 @@ def cmd_down(args):
     print("down: 容器与网络已清理")
 
 
+def cmd_reset(args):
+    """不同 plan 之间必须重置：否则上一轮起的服务还占着端口，会制造假通过。"""
+    cmd_down(args)
+    cmd_up(args)
+
+
 def cmd_all(args):
     cmd_up(args)
     cmd_apply(args)
@@ -290,14 +343,14 @@ def main():
     ap.add_argument("--only", help="只跑指定发行版，逗号分隔")
     ap.add_argument("--skip-pull", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for c in ("init", "up", "apply", "verify", "report", "down", "all"):
+    for c in ("init", "up", "apply", "verify", "report", "down", "reset", "all"):
         p = sub.add_parser(c)
         p.add_argument("--only", help="只跑指定发行版，逗号分隔")
         p.add_argument("--skip-pull", action="store_true")
         p.add_argument("--plan", help="使用指定计划文件（相对仓库根，默认 plan/migration.json）")
     args = ap.parse_args()
     {"init": cmd_init, "up": cmd_up, "apply": cmd_apply, "verify": cmd_verify,
-     "report": cmd_report, "down": cmd_down, "all": cmd_all}[args.cmd](args)
+     "report": cmd_report, "down": cmd_down, "reset": cmd_reset, "all": cmd_all}[args.cmd](args)
 
 
 if __name__ == "__main__":

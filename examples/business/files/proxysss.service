@@ -1,0 +1,19 @@
+[Unit]
+Description=proxysss gateway (business server)
+Documentation=https://github.com/neko233-com/proxysss
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/server/proxysss
+ExecStart=/server/proxysss/proxysss --config /server/proxysss/proxysss.yaml
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+# 业务机常见：绑定 80/443 需要放开
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
