@@ -13,12 +13,14 @@ ssh root@源服务器 'bash -s' < scripts/snapshot.sh
 
 ## 2. 编写迁移计划
 
+有快照时先跑 `python scripts/plan_from_snapshot.py`，自动把包清单、业务用户、cron 写进 `plan/migration.json`，再人工补 `files` 与 `commands`；无快照用 `python scripts/matrix.py init` 手写。
+
 `plan/migration.json`：
 
-- `packages`：目标机器要确保存在的包。
+- `packages`：目标机器要确保存在的包（原样复刻时可直接放全量清单，再裁剪）。
 - `files`：要落盘的配置（`src` 相对 plan/，`dest` 容器内路径，`contains` 必含文本）。
 - `groups` / `users`：`users[].group` 为所属组。
-- `cron`：`expr` 五段表达式 + `cmd`。
+- `cron`：`expr` 五段表达式 + `cmd`；apply 阶段写入 `/etc/cron.d/linuxmig`。
 - `commands`：`command -v` 可发现的二进制名。
 - `per_distro`：发行版专属覆盖，键名同 matrix.json。
 
@@ -38,7 +40,8 @@ python scripts/matrix.py down                # 清理
 - `pkg:xxx not installed` → 该发行版仓库无此包，换包名或加 `epel-release` 类前置包，用 `per_distro` 区分。
 - `file:... missing` → 目标路径不同，改 `dest` 或在 `per_distro` 替换。
 - `cmd:xxx not found` → 可执行文件路径不在 PATH，或包未装。
-- `user/group/cron` FAIL → 脚本未创建成功，检查 apply 阶段日志。
+- `user/group` FAIL → 脚本未创建成功，检查 apply 阶段日志。
+- `cron` FAIL → `/etc/cron.d/linuxmig` 未写入或表达式/命令缺失，检查 plan 中 cron 条目。
 
 报告全绿后，再把同一计划对照真实服务器检查清单过一遍。
 

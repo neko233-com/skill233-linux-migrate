@@ -1,12 +1,13 @@
 # skill233-linux-migrate · 本机 Compose 矩阵验证服务器迁移
 
-在本机用 Kiri / Docker Compose 拉起 Debian、Ubuntu、CentOS(Stream)、Rocky、Alma、Alpine 容器矩阵，
-**不碰生产**先把迁移方案和部署脚本跑一遍，找出包名 / 服务名 / 路径 / 防火墙差异，再上真实服务器。
+**只搬软件、不换 OS**：在本机用 Kiri / Docker Compose 拉起 Debian、Ubuntu、CentOS(Stream)、Rocky、Alma、Alpine 容器矩阵，
+**不碰生产**先把源机软件栈（包、配置、用户、cron）复刻方案跑一遍，找出包名 / 服务名 / 路径 / 防火墙差异，再上真实服务器。
 
 ## 快速开始
 
 ```bash
-python scripts/matrix.py init      # 生成示例 plan（首次）
+python scripts/snapshot.sh  # (可选) 在源服务器采集基线，拷回 snapshot/source.txt
+python scripts/plan_from_snapshot.py   # 快照 → plan/migration.json（或 matrix.py init 手写）
 python scripts/matrix.py all       # up → apply → verify → report
 python scripts/matrix.py down      # 清理容器
 ```
@@ -40,9 +41,9 @@ python scripts/matrix.py down      # 清理容器
 }
 ```
 
-校验项：`pkg:` 包安装、`file:` 文件落盘含文本、`cmd:` 命令可发现、`user:`/`group:` 存在、`cron:` 入 crontab。
+校验项：`pkg:` 包安装、`file:` 文件落盘含文本、`cmd:` 命令可发现、`user:`/`group:` 存在、`cron:` 任务定义写入 `/etc/cron.d/linuxmig`。
 
-> 容器无 systemd / 无内核 / 无真实网卡：本工具只验证包、配置、命令、用户、cron 这一层；
+> 容器无 systemd / 无内核 / 无真实网卡：本工具只验证包、配置、命令、用户、cron 定义这一层；
 > 服务启停、端口连通、防火墙策略需在真实目标机验证。详见 `references/workflow.md`。
 
 ## 作为 Agent Skill 使用

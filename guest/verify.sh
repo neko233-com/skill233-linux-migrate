@@ -1,6 +1,6 @@
 #!/bin/sh
 # verify.sh — 容器内校验（matrix.py 调用，$1=计划目录 $2=输出 TSV 路径）
-# TSV 每行: STATUS|检查项|细节；STATUS ∈ PASS/FAIL/SKIP
+# TSV 每行: STATUS|检查项|细节；STATUS ∈ PASS/FAIL
 set -u
 PLAN_DIR="$1"; OUT="$2"
 . "$PLAN_DIR/apply.env"
@@ -8,7 +8,6 @@ PLAN_DIR="$1"; OUT="$2"
 
 pass() { echo "PASS|$1|$2" >> "$OUT"; }
 fail() { echo "FAIL|$1|$2" >> "$OUT"; }
-skip() { echo "SKIP|$1|$2" >> "$OUT"; }
 
 # --- 探测（用于包检查）---
 if command -v dpkg-query >/dev/null 2>&1; then PM=apt
@@ -27,7 +26,7 @@ pkg_installed() {
 }
 
 # --- 包 ---
-for p in ${PACKAGES:-}; do
+for p in ${PKGS:-}; do
   if pkg_installed "$p"; then pass "pkg:$p" "installed"
   else fail "pkg:$p" "not installed"; fi
 done
@@ -49,41 +48,36 @@ while true; do
 done
 
 # --- 命令 ---
-for c in ${COMMANDS:-}; do
+for c in ${CMDS:-}; do
   if command -v "$c" >/dev/null 2>&1; then pass "cmd:$c" "found"
   else fail "cmd:$c" "not found"; fi
 done
 
 # --- 用户 / 组 ---
-for u in ${USERS:-}; do
+for u in ${USERLIST:-}; do
   name=${u%%:*}
   if id "$name" >/dev/null 2>&1; then pass "user:$name" "exists"
   else fail "user:$name" "missing"; fi
 done
-for g in ${GROUPS:-}; do
+for g in ${GROUPLIST:-}; do
   if getent group "$g" >/dev/null 2>&1; then pass "group:$g" "exists"
   else fail "group:$g" "missing"; fi
 done
 
-# --- cron（容器无 crontab 时 SKIP，不算失败）---
-if command -v crontab >/dev/null 2>&1; then
-  i=0
-  while true; do
-    eval "expr=\${CRON${i}_EXPR:-}"
-    [ -z "$expr" ] && break
-    eval "cmd=\${CRON${i}_CMD:-}"
-    if crontab -l 2>/dev/null | grep -Fq "$cmd"; then pass "cron:$expr" "installed"
-    else fail "cron:$expr" "not in crontab"; fi
-    i=$((i + 1))
-  done
-else
-  i=0
-  while true; do
-    eval "expr=\${CRON${i}_EXPR:-}"
-    [ -z "$expr" ] && break
-    skip "cron:$expr" "crontab unavailable in container"
-    i=$((i + 1))
-  done
-fi
+# --- cron：校验 /etc/cron.d/linuxmig 内表达式与命令均在 ---
+i=0
+while true; do
+  eval "expr=\${CRON${i}_EXPR:-}"
+  [ -z "$expr" ] && break
+  eval "cmd=\${CRON${i}_CMD:-}"
+  if [ -f /etc/cron.d/linuxmig ] \
+    && grep -Fq "$cmd" /etc/cron.d/linuxmig \
+    && grep -Fq "$expr" /etc/cron.d/linuxmig; then
+    pass "cron:$expr" "installed in /etc/cron.d"
+  else
+    fail "cron:$expr" "missing in /etc/cron.d"
+  fi
+  i=$((i + 1))
+done
 
 echo "verify done -> $OUT"

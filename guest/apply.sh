@@ -12,63 +12,66 @@ elif command -v apk >/dev/null 2>&1; then PM=apk
 else PM=none; fi
 
 # --- 安装包 ---
-if [ -n "${PACKAGES:-}" ] && [ "$PM" != "none" ]; then
+if [ -n "${PKGS:-}" ] && [ "$PM" != "none" ]; then
   case "$PM" in
     apt) apt-get update -y >/dev/null 2>&1
-         DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES >/dev/null 2>&1 ;;
-    dnf) dnf install -y $PACKAGES >/dev/null 2>&1 ;;
-    yum) yum install -y $PACKAGES >/dev/null 2>&1 ;;
-    apk) apk add --no-cache $PACKAGES >/dev/null 2>&1 ;;
+         DEBIAN_FRONTEND=noninteractive apt-get install -y $PKGS >/dev/null 2>&1 ;;
+    dnf) dnf install -y $PKGS >/dev/null 2>&1 ;;
+    yum) yum install -y $PKGS >/dev/null 2>&1 ;;
+    apk) apk add --no-cache $PKGS >/dev/null 2>&1 ;;
   esac
 fi
 
-# --- 落配置文件（先于用户创建，保证配置可见）---
+# --- 落配置文件 ---
 i=0
 while true; do
   eval "dest=\${FILE${i}_DEST:-}"
   [ -z "$dest" ] && break
-  eval "want=\${FILE${i}_CONTAINS:-}"
   mkdir -p "$(dirname "$dest")"
   cp "$PLAN_DIR/files/$i" "$dest" 2>/dev/null || true
   i=$((i + 1))
 done
 
-# --- 组（优先系统工具，缺失时手动追加 /etc/group）---
+# --- 组：先试系统工具，失败则手动追加 /etc/group ---
 ensure_group() {
   g="$1"
   getent group "$g" >/dev/null 2>&1 && return 0
-  if command -v groupadd >/dev/null 2>&1; then groupadd -r "$g" && return 0; fi
-  gid=$(awk -F: '{if ($3 > m) m=$3} END {print m+1}' /etc/group)
+  command -v groupadd >/dev/null 2>&1 && groupadd -r "$g" 2>/dev/null
+  getent group "$g" >/dev/null 2>&1 && return 0
+  gid=$(awk -F: 'BEGIN{m=99} $3 ~ /^[0-9]+$/ && $3 > m {m=$3} END{print m+1}' /etc/group)
   echo "$g:x:$gid:" >> /etc/group
 }
 
-# --- 用户（同上兜底）---
+# --- 用户：先试系统工具，失败则手动追加 /etc/passwd ---
 ensure_user() {
   name="$1"; grp="$2"
   id "$name" >/dev/null 2>&1 && return 0
-  if command -v useradd >/dev/null 2>&1; then useradd -r -m -g "$grp" "$name" && return 0; fi
-  gid=$(getent group "$grp" | cut -d: -f3)
-  uid=$(awk -F: '{if ($3 > m) m=$3} END {print m+1}' /etc/passwd)
-  echo "$name:x:$uid:${gid:-100}::/home/$name:/usr/sbin/nologin" >> /etc/passwd
+  command -v useradd >/dev/null 2>&1 && useradd -r -g "$grp" "$name" 2>/dev/null
+  id "$name" >/dev/null 2>&1 && return 0
+  gid=$(getent group "$grp" | cut -d: -f3); [ -z "$gid" ] && gid=100
+  uid=$(awk -F: 'BEGIN{m=99} $3 ~ /^[0-9]+$/ && $3 > m {m=$3} END{print m+1}' /etc/passwd)
+  echo "$name:x:$uid:${gid}::/home/$name:/usr/sbin/nologin" >> /etc/passwd
 }
 
-for g in ${GROUPS:-}; do ensure_group "$g"; done
-for u in ${USERS:-}; do
+for g in ${GROUPLIST:-}; do ensure_group "$g"; done
+for u in ${USERLIST:-}; do
   name=${u%%:*}; grp=${u#*:}
   [ -z "$grp" ] && grp="$name"
   ensure_user "$name" "$grp"
 done
 
-# --- cron（仅当 crontab 可用）---
-if command -v crontab >/dev/null 2>&1; then
-  i=0
-  while true; do
-    eval "expr=\${CRON${i}_EXPR:-}"
-    [ -z "$expr" ] && break
-    eval "cmd=\${CRON${i}_CMD:-}"
-    ( crontab -l 2>/dev/null; echo "$expr $cmd" ) | crontab - 2>/dev/null || true
-    i=$((i + 1))
-  done
-fi
+# --- cron：写入 /etc/cron.d/linuxmig（可移植，不依赖 crontab CLI / 守护进程）---
+i=0
+have_cron=0
+while true; do
+  eval "expr=\${CRON${i}_EXPR:-}"
+  [ -z "$expr" ] && break
+  have_cron=1
+  eval "cmd=\${CRON${i}_CMD:-}"
+  mkdir -p /etc/cron.d
+  echo "$expr root $cmd" >> /etc/cron.d/linuxmig 2>/dev/null || true
+  i=$((i + 1))
+done
+[ "$have_cron" = 1 ] && chmod 644 /etc/cron.d/linuxmig 2>/dev/null || true
 
 echo "apply done (PM=$PM)"

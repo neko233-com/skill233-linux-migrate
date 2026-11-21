@@ -109,11 +109,11 @@ def materialize(distro_name: str, merged: dict) -> Path:
     files_d.mkdir(parents=True)
 
     env_lines = []
-    env_lines.append(f'PACKAGES="{" ".join(merged["packages"])}"')
-    env_lines.append(f'GROUPS="{" ".join(merged["groups"])}"')
+    env_lines.append(f'PKGS="{" ".join(merged["packages"])}"')
+    env_lines.append(f'GROUPLIST="{" ".join(merged["groups"])}"')
     users = [f'{u["name"]}:{u.get("group", "")}' for u in merged["users"]]
-    env_lines.append(f'USERS="{" ".join(users)}"')
-    env_lines.append(f'COMMANDS="{" ".join(merged["commands"])}"')
+    env_lines.append(f'USERLIST="{" ".join(users)}"')
+    env_lines.append(f'CMDS="{" ".join(merged["commands"])}"')
 
     for i, f in enumerate(merged["files"]):
         src = PLAN_DIR / f["src"]
@@ -179,7 +179,9 @@ def cmd_apply(args):
         merged = merge_plan(name, plan)
         mdir = materialize(name, merged)
         cname = container_name(d)
-        run(["docker", "cp", f"{mdir}/", f"{cname}:/tmp/plan-{name}"], check=False)
+        run(["docker", "exec", cname, "rm", "-rf", f"/tmp/plan-{name}"], check=False)
+        # mdir/. 复制目录内容到目标，避免 docker cp 把源目录套成子目录
+        run(["docker", "cp", f"{mdir}/.", f"{cname}:/tmp/plan-{name}"], check=False)
         r = run(["docker", "exec", cname, "sh", "/guest/apply.sh", f"/tmp/plan-{name}"], check=False, capture=True)
         print(f"[apply] {name}: {r.stdout.strip() or r.stderr.strip()}")
 
@@ -220,41 +222,35 @@ def cmd_report(args):
         checks = parse_tsv(OUT / f"{name}.tsv")
         passed = sum(1 for c in checks if c["status"] == "PASS")
         failed = sum(1 for c in checks if c["status"] == "FAIL")
-        skipped = sum(1 for c in checks if c["status"] == "SKIP")
         total_fail += failed
         results[name] = {"image": d["image"], "pass": passed, "fail": failed,
-                         "skip": skipped, "checks": checks}
+                         "checks": checks}
 
     # Markdown
     md = ["# Linux 迁移验证报告\n"]
-    md.append("| 发行版 | 镜像 | PASS | FAIL | SKIP |")
-    md.append("| --- | --- | --- | --- | --- |")
+    md.append("| 发行版 | 镜像 | PASS | FAIL |")
+    md.append("| --- | --- | --- | --- |")
     for name, r in results.items():
-        md.append(f"| {name} | `{r['image']}` | {r['pass']} | {r['fail']} | {r['skip']} |")
+        md.append(f"| {name} | `{r['image']}` | {r['pass']} | {r['fail']} |")
     md.append("")
     for name, r in results.items():
         fails = [c for c in r["checks"] if c["status"] == "FAIL"]
-        skips = [c for c in r["checks"] if c["status"] == "SKIP"]
-        md.append(f"## {name}（{r['pass']} pass / {r['fail']} fail / {r['skip']} skip）")
+        md.append(f"## {name}（{r['pass']} pass / {r['fail']} fail）")
         if not fails:
             md.append("- 全部通过\n")
-        else:
-            md.append("| 检查项 | 问题 |")
-            md.append("| --- | --- |")
-            for c in fails:
-                md.append(f"| {c['name']} | {c['detail']} |")
-            md.append("")
-        for c in skips:
-            md.append(f"- SKIP `{c['name']}`: {c['detail']}")
-        if skips:
-            md.append("")
+            continue
+        md.append("| 检查项 | 问题 |")
+        md.append("| --- | --- |")
+        for c in fails:
+            md.append(f"| {c['name']} | {c['detail']} |")
+        md.append("")
     (REPORT_DIR / "migration-report.md").write_text("\n".join(md), encoding="utf-8")
     (REPORT_DIR / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 控制台
     for name, r in results.items():
         icon = "OK " if r["fail"] == 0 else "FAIL"
-        print(f"{icon} {name}: {r['pass']} pass / {r['fail']} fail / {r['skip']} skip")
+        print(f"{icon} {name}: {r['pass']} pass / {r['fail']} fail")
     print(f"\n报告: {REPORT_DIR / 'migration-report.md'}")
     if total_fail:
         sys.exit(1)
