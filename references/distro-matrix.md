@@ -23,11 +23,14 @@
 
 | 内容 | Debian/Ubuntu | RHEL 系 |
 | --- | --- | --- |
-| nginx 配置 | `/etc/nginx/` | `/etc/nginx/`（dnf 装 nginx 后一致） |
+| nginx 配置主目录 | `/etc/nginx/` | `/etc/nginx/` |
+| nginx 站点片段 | `/etc/nginx/sites-enabled/`（conf.d 默认不读） | `/etc/nginx/conf.d/` |
 | Apache 配置 | `/etc/apache2/` | `/etc/httpd/` |
 | 站点目录 | `/var/www/html` | `/var/www/html` |
 | 日志 | `/var/log/nginx/` | `/var/log/nginx/` |
 | 时区数据 | `/usr/share/zoneinfo` | 同左（`tzdata` 包） |
+
+> 注意：`/etc/nginx/conf.d/` 在 Debian/Ubuntu 的 nginx 默认配置里不被加载（那里是 RHEL 系约定）。把站点配置写到 conf.d 在 RHEL 系成立，在 Debian/Ubuntu 应写到 `sites-enabled` 并用 `per_distro` 区分目标路径。
 
 ## 防火墙差异
 

@@ -1,0 +1,11 @@
+{
+  "packages": ["nginx"],
+  "files": [
+    { "src": "prod.conf", "dest": "/etc/nginx/conf.d/prod.conf", "contains": "server_name" }
+  ],
+  "groups": ["deploy"],
+  "users": [{ "name": "deploy", "group": "deploy" }],
+  "cron": [{ "expr": "0 3 * * *", "cmd": "/opt/backup.sh" }],
+  "commands": ["nginx"],
+  "per_distro": {}
+}

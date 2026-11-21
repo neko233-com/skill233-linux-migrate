@@ -5,6 +5,7 @@
   "distros": [
     { "name": "debian-bookworm", "image": "debian:bookworm-slim", "enabled": true },
     { "name": "ubuntu-noble", "image": "ubuntu:24.04", "enabled": true },
+    { "name": "ubuntu-jammy", "image": "ubuntu:22.04", "enabled": false },
     { "name": "rocky-9", "image": "rockylinux:9", "enabled": true },
     { "name": "centos-stream9", "image": "quay.io/centos/centos:stream9", "enabled": true },
     { "name": "alma-9", "image": "almalinux:9", "enabled": false },

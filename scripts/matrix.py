@@ -102,7 +102,7 @@ def merge_plan(distro_name: str, plan: dict) -> dict:
     return merged
 
 
-def materialize(distro_name: str, merged: dict) -> Path:
+def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR) -> Path:
     d = OUT / "plan" / distro_name
     shutil.rmtree(d, ignore_errors=True)
     files_d = d / "files"
@@ -116,7 +116,7 @@ def materialize(distro_name: str, merged: dict) -> Path:
     env_lines.append(f'CMDS="{" ".join(merged["commands"])}"')
 
     for i, f in enumerate(merged["files"]):
-        src = PLAN_DIR / f["src"]
+        src = base_dir / f["src"]
         (files_d / str(i)).write_bytes(src.read_bytes())
         env_lines.append(f'FILE{i}_DEST={shq(f["dest"])}')
         env_lines.append(f'FILE{i}_CONTAINS={shq(f.get("contains", ""))}')
@@ -170,14 +170,21 @@ def container_name(d):
     return f"lm-{d['name']}"
 
 
+def load_plan(args):
+    if getattr(args, "plan", None):
+        return load_json(ROOT / args.plan)
+    return load_json(PLAN_DIR / "migration.json")
+
+
 def cmd_apply(args):
     matrix = load_json(ROOT / "matrix.json")
-    plan = load_json(PLAN_DIR / "migration.json")
+    plan = load_plan(args)
+    plan_base = (ROOT / args.plan).parent if getattr(args, "plan", None) else PLAN_DIR
     distros = enabled_distros(matrix, set(parse_only(args)))
     for d in distros:
         name = d["name"]
         merged = merge_plan(name, plan)
-        mdir = materialize(name, merged)
+        mdir = materialize(name, merged, plan_base)
         cname = container_name(d)
         run(["docker", "exec", cname, "rm", "-rf", f"/tmp/plan-{name}"], check=False)
         # mdir/. 复制目录内容到目标，避免 docker cp 把源目录套成子目录
@@ -282,6 +289,7 @@ def main():
         p = sub.add_parser(c)
         p.add_argument("--only", help="只跑指定发行版，逗号分隔")
         p.add_argument("--skip-pull", action="store_true")
+        p.add_argument("--plan", help="使用指定计划文件（相对仓库根，默认 plan/migration.json）")
     args = ap.parse_args()
     {"init": cmd_init, "up": cmd_up, "apply": cmd_apply, "verify": cmd_verify,
      "report": cmd_report, "down": cmd_down, "all": cmd_all}[args.cmd](args)

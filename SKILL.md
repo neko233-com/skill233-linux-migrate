@@ -42,6 +42,8 @@ python --version                                        # 3.10+，无第三方�
 独立脚本：`python scripts/plan_from_snapshot.py` 把 `snapshot/source.txt` 转成 `plan/migration.json`（包/用户/cron 自动带出）。
 
 指定发行版子集：`python scripts/matrix.py all --only rocky-9,ubuntu-noble`。
+用自定义计划：`--plan examples/prod/plan.json`（文件相对计划目录解析）。
+示例场景：`examples/prod/`（nginx 站点 + deploy 用户 + 备份 cron）。
 
 ## matrix.json（选哪些发行版）
 
@@ -110,3 +112,4 @@ python --version                                        # 3.10+，无第三方�
 
 - `references/distro-matrix.md` — 各发行版包管理器/服务/路径/防火墙速查表与差异修法。
 - `references/workflow.md` — 完整流程细节、systemd-in-docker、真实服务器收尾检查清单。
+- `references/aliyun-to-volcengine.md` — 阿里云 → 火山引擎迁移专项清单（OS/数据/网络/切流回滚）。

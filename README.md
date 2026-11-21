@@ -13,6 +13,7 @@ python scripts/matrix.py down      # 清理容器
 ```
 
 报告输出到 `report/migration-report.md`；有 FAIL 时命令退出码为 1。
+自定义计划：`python scripts/matrix.py all --plan examples/prod/plan.json`；`examples/prod/` 是 nginx 站点 + deploy 用户 + 备份 cron 的生产风格示例。
 
 ## 矩阵（matrix.json 里启用/注释）
 
@@ -45,6 +46,7 @@ python scripts/matrix.py down      # 清理容器
 
 > 容器无 systemd / 无内核 / 无真实网卡：本工具只验证包、配置、命令、用户、cron 定义这一层；
 > 服务启停、端口连通、防火墙策略需在真实目标机验证。详见 `references/workflow.md`。
+> 阿里云 → 火山引擎迁移见 `references/aliyun-to-volcengine.md`。
 
 ## 作为 Agent Skill 使用
 
