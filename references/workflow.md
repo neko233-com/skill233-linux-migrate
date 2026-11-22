@@ -13,17 +13,20 @@ ssh root@源服务器 'bash -s' < scripts/snapshot.sh
 
 ## 2. 编写迁移计划
 
-有快照时先跑 `python scripts/plan_from_snapshot.py`，自动把包清单、业务用户、cron 写进 `plan/migration.json`，再人工补 `files` 与 `commands`；无快照用 `python scripts/matrix.py init` 手写。
+有快照时先跑 `python scripts/plan_from_snapshot.py`，自动把包清单、业务用户、cron、`/server` 目录树、业务二进制 glibc 下限写进 `plan/migration.json`，再人工补 `files`、`units`、`services`（启动命令与端口）；无快照用 `python scripts/matrix.py init` 手写。
 
 `plan/migration.json`：
 
 - `packages`：目标机器要确保存在的包（原样复刻时可直接放全量清单，再裁剪）。RHEL 9 minimal 装 `curl` 需 `--allowerasing`（脚本会自动重试）。
 - `files`：要落盘的配置（`src` 相对 plan/，`dest` 容器内路径，`contains` 必含文本）。
+- `dirs`：整棵业务目录树（如 `/server`），host 打 tar、容器解包，保结构保权限；`src_root` 可指向仓库外的真实副本。
+- `units`：systemd unit 落盘；镜像有 `systemd-analyze` 做真实校验，否则结构校验。
+- `services`：真正启动业务进程并校验端口归属（`port` 必填才能验监听）。
 - `groups` / `users`：`users[].group` 为所属组。
 - `cron`：`expr` 五段表达式 + `cmd`；apply 按系写入 `/etc/cron.d` 或 `/etc/crontabs/root`。
 - `commands`：`command -v` 可发现的二进制名。
-- `checks`：容器内执行的校验命令，用于验证程序层（如 `nginx -T` 里能否看到你的 server 块）。
-- `per_distro`：发行版专属覆盖，键名同 matrix.json。
+- `checks`：容器内执行的校验命令，用于验证程序层（如 `nginx -T` 里能否看到你的 server 块、业务端口能否回包、glibc 版本是否够）。
+- `per_distro`：发行版专属覆盖，键名同 matrix.json（支持 `files/dirs/units/services/...` 全部列表键）。
 
 ## 3. 跑矩阵
 
@@ -31,8 +34,12 @@ ssh root@源服务器 'bash -s' < scripts/snapshot.sh
 python scripts/matrix.py all                 # 全部启用发行版
 python scripts/matrix.py all --only rocky-9,ubuntu-noble
 python scripts/matrix.py up                  # 只起容器
+python scripts/matrix.py reset               # 换 plan 前重置（down + up）
 python scripts/matrix.py down                # 清理
 ```
+
+> 换计划文件必须 `reset`：上一轮起的业务进程会占着端口，虽然 `svc:` 校验会识别「端口不是本进程持有」，
+> 但残留进程仍可能让后续服务起不来，干扰结论。
 
 ## 4. 读报告并迭代
 
@@ -41,6 +48,11 @@ python scripts/matrix.py down                # 清理
 - `pkg:xxx not installed` → 该发行版仓库无此包，换包名或加 `epel-release` 类前置包，用 `per_distro` 区分。
 - `file:... missing` → 目标路径不同，改 `dest` 或在 `per_distro` 替换。
 - `cmd:xxx not found` → 可执行文件路径不在 PATH，或包未装。
+- `dir:xxx missing` → 业务目录树没解开，检查 `dirs[].src`/`src_root` 与 tar 包内容。
+- `unit:xxx` FAIL → unit 缺 `[Unit]/[Service]/ExecStart=`，或 `ExecStart` 指向的二进制不存在/不可执行。
+- `svc:xxx` FAIL →看 detail：`process dead` 查 `/tmp/svc-<name>.log`（多为二进制跑不起来，如 glibc/musl 不兼容）；
+  `not owned by pid` 说明端口被别的进程占着，先 `reset`；`not LISTEN` 说明进程活着但没绑上端口（配置/端口冲突）。
+- `check:glibc>=x:yyy` FAIL → 目标机 libc 低于产物要求，见 `business-stack.md`（换 OS / 编 musl / 容器化）。
 - `user/group` FAIL → 脚本未创建成功，检查 apply 阶段日志。
 - `cron` FAIL → `/etc/cron.d/linuxmig` 未写入或表达式/命令缺失，检查 plan 中 cron 条目。
 

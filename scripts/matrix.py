@@ -67,18 +67,24 @@ def cmd_init(_args):
         example.write_text(json.dumps({
             "packages": ["curl"],
             "files": [{"src": "files/hello.conf", "dest": "/etc/hello-migrate.conf", "contains": "migrated"}],
+            "dirs": [{"src": "server", "dest": "/server"}],
+            "units": [{"src": "app.service", "name": "app.service", "dest": "/etc/systemd/system/app.service"}],
+            "services": [{"name": "app", "start": "cd /server/app && ./app --config app.yaml",
+                          "stop": "pkill -f '/server/app'", "port": 8080, "wait": 5}],
             "groups": ["appdemo"],
             "users": [{"name": "appdemo", "group": "appdemo"}],
             "cron": [{"expr": "*/10 * * * *", "cmd": "/opt/app/collect.sh"}],
             "commands": ["curl"],
+            "checks": [{"name": "app-port", "cmd": "curl -s -m 3 -o /dev/null http://127.0.0.1:8080/"}],
             "per_distro": {}
-        }, ensure_ascii=False, indent=2))
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
     files_dir = PLAN_DIR / "files"
     files_dir.mkdir(exist_ok=True)
     hello = files_dir / "hello.conf"
     if not hello.exists():
         hello.write_text("# migrated config\nkey=value\n", encoding="utf-8")
     print("init: plan/migration.json 与示例文件已就绪")
+    print("提示：dirs/units/services 是业务栈常用项，没有就删掉对应键；src_root 可指向仓库外的真实业务树。")
 
 
 # ---------- 物化计划 ----------

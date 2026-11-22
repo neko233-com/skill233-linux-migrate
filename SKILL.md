@@ -21,7 +21,7 @@ python --version                                        # 3.10+，无第三方�
 ## 标准工作流
 
 1. **（可选）采集源快照**：在源服务器上跑 `scripts/snapshot.sh`，得到 `snapshot/source.txt`（系统、包清单、启用服务、监听端口、业务目录、cron、用户组、防火墙）。
-2. **快照转计划**：`python scripts/plan_from_snapshot.py` 自动把包清单、业务用户、cron 写进 `plan/migration.json`；无快照则 `python scripts/matrix.py init` 手写。
+2. **快照转计划**：`python scripts/plan_from_snapshot.py` 自动把包清单、业务用户、cron、`/server` 目录树、业务二进制 glibc 兼容检查写进 `plan/migration.json`；无快照则 `python scripts/matrix.py init` 手写。
 3. **编辑计划**：补配置文件（`files`）、业务目录（`dirs`，如 `/server`）、systemd unit（`units`）、常驻服务（`services`）、命令（`commands`）；发行版专属差异用 `per_distro` 覆盖。
 4. **跑矩阵**：`python scripts/matrix.py all`（= up → apply → verify → report）。
 5. **读报告**：`report/migration-report.md`，逐发行版看 PASS/FAIL，按建议改计划或脚本。
