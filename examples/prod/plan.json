@@ -1,11 +1,22 @@
 {
-  "packages": ["nginx"],
-  "files": [
-    { "src": "prod.conf", "dest": "/etc/nginx/conf.d/prod.conf", "contains": "server_name" }
+  "src_root": "out/proxysss-stack",
+  "packages": ["curl"],
+  "dirs": [
+    { "src": "server", "dest": "/server" }
   ],
   "groups": ["deploy"],
   "users": [{ "name": "deploy", "group": "deploy" }],
-  "cron": [{ "expr": "0 3 * * *", "cmd": "/opt/backup.sh" }],
-  "commands": ["nginx"],
-  "per_distro": {}
+  "cron": [{ "expr": "0 3 * * *", "cmd": "/server/backup.sh" }],
+  "services": [
+    {
+      "name": "proxysss",
+      "start": "cd /server/proxysss && ./proxysss run -c proxysss.yaml",
+      "stop": "pkill -f 'proxysss run'",
+      "port": 8080,
+      "wait": 8
+    }
+  ],
+  "checks": [
+    { "name": "static-site", "cmd": "curl -sf http://127.0.0.1:8080/ | grep -q 'proxysss business ok'" }
+  ]
 }

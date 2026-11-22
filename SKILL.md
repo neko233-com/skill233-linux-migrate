@@ -1,6 +1,6 @@
 ---
 name: linux-migrate
-description: 在本机用 Kiri / Docker Compose 拉起 Debian、Ubuntu、CentOS(Stream)、Rocky、Alma、Alpine 发行版容器矩阵，不碰生产即可验证 Linux 服务器迁移方案与部署脚本：采集源服务器快照、按发行版差异适配安装与配置、逐项校验并生成兼容报告。当用户要迁移服务器、评估跨发行版兼容性、移植 apt/dnf 安装脚本、上生产前预检迁移步骤，或在本机模拟多发行版环境时使用。
+description: 在本机用 Kiri / Docker Compose 拉起 Debian、Ubuntu、CentOS(Stream)、Rocky、Alma、Alpine 发行版容器矩阵，不碰生产即可验证 Linux 服务器迁移方案与部署脚本：采集源服务器快照、按发行版差异适配安装与配置、逐项校验并生成兼容报告；业务主线用 proxysss（替代 nginx），并支持把验过的同一份计划经 prod_deploy 部署到真实目标机（自动备份、原地校验、一键回滚）。当用户要迁移服务器、评估跨发行版兼容性、移植 apt/dnf 安装脚本、上生产前预检迁移步骤，或在本机模拟多发行版环境时使用。
 ---
 
 # Linux Migrate · 本机 Compose 矩阵验证服务器迁移
@@ -20,12 +20,14 @@ python --version                                        # 3.10+，无第三方�
 
 ## 标准工作流
 
-1. **（可选）采集源快照**：在源服务器上跑 `scripts/snapshot.sh`，得到 `snapshot/source.txt`（系统、包清单、启用服务、监听端口、业务目录、cron、用户组、防火墙）。
-2. **快照转计划**：`python scripts/plan_from_snapshot.py` 自动把包清单、业务用户、cron、`/server` 目录树、业务二进制 glibc 兼容检查写进 `plan/migration.json`；无快照则 `python scripts/matrix.py init` 手写。
-3. **编辑计划**：补配置文件（`files`）、业务目录（`dirs`，如 `/server`）、systemd unit（`units`）、常驻服务（`services`）、命令（`commands`）；发行版专属差异用 `per_distro` 覆盖。
+0. **（业务主线）拉取 proxysss**：`python scripts/fetch_proxysss.py` 从 `neko233-com/proxysss` 的 GitHub Release 拉二进制并组装 `/server` 业务树（proxysss 替代 nginx；v1.3.15+ 全静态，7 发行版通用）。
+1. **（可选）采集源快照**：在源服务器上跑 `scripts/snapshot.sh`，得到 `snapshot/source.txt`（系统、包清单、启用服务、监听端口、业务目录、unit 原文、二进制 glibc 下限、cron、用户组、防火墙）。
+2. **快照转计划**：`python scripts/plan_from_snapshot.py` 自动把包清单、业务用户、cron、`/server` 目录树、unit（落盘+派生 services）、业务二进制 glibc 兼容检查写进 `plan/migration.json`；无快照则 `python scripts/matrix.py init` 手写。
+3. **编辑计划**：补配置文件（`files`）、业务目录（`dirs`，如 `/server`）、systemd unit（`units`）、常驻服务（`services`，补 port/stop）、命令（`commands`）；发行版专属差异用 `per_distro` 覆盖。
 4. **跑矩阵**：`python scripts/matrix.py all`（= up → apply → verify → report）。
 5. **读报告**：`report/migration-report.md`，逐发行版看 PASS/FAIL，按建议改计划或脚本。
-6. **清理**：`python scripts/matrix.py down`。
+6. **生产部署**：矩阵全绿后 `python scripts/prod_deploy.py --plan <plan> --transport ssh --target root@<目标机>`——同一份计划在目标机执行（自动备份 → systemd 托管 → 原地 verify → 报告）；失败 `--rollback` 一键恢复。不碰真机预演用 `--transport docker --container lm-<distro>`。
+7. **清理**：`python scripts/matrix.py down`。
 
 > 换计划文件（例如先跑 examples/business 再跑真实业务树）**必须先 `down` 再 `up`（或 `reset`）**：
 > 上一轮起的服务还占着端口，会造成「端口被占但不是本服务」的假通过。`verify` 已按「端口是否由该服务的 pid 持有」判定，但容器仍应干净。
@@ -43,14 +45,17 @@ python --version                                        # 3.10+，无第三方�
 | `reset` | down + up，切换计划前重置干净环境 |
 | `all` | up → apply → verify → report 一条龙 |
 
-独立脚本：`python scripts/plan_from_snapshot.py` 把 `snapshot/source.txt` 转成 `plan/migration.json`（包/用户/cron 自动带出）。
+独立脚本：
+- `python scripts/fetch_proxysss.py` — 从 `neko233-com/proxysss` Release 拉二进制组装 `/server` 业务树（业务主线，替代 nginx）。
+- `python scripts/plan_from_snapshot.py` — 快照 → 计划（包/用户/cron/目录树/unit/服务/glibc 检查自动带出）。
+- `python scripts/prod_deploy.py` — 目标机生产执行器：`--transport ssh --target root@<EIP>` 真实部署；`--transport docker --container lm-<distro>` 本机预演；`--rollback` 恢复最近一次部署前状态。自动备份到 `/var/backups/linuxmig-<ts>`，目标机原地 verify 出 `report/target-report.md`，有 FAIL 退出码 1。
 
 指定发行版子集：`python scripts/matrix.py all --only rocky-9,ubuntu-noble`。
-用自定义计划：`--plan examples/deep/plan.json`（`files/dirs/units` 的 `src` 相对计划目录解析；`src_root` 可整体改基准）。
+用自定义计划：`--plan examples/deep/plan.json`（`files/units` 的 `src` 相对计划目录；`dirs` 受 `src_root` 控制）。
 示例场景：
-- `examples/prod/` — 最小 nginx 站点；
-- `examples/deep/` — 双用户组 + 双 cron + 三系 nginx 路径 + `nginx -T` 程序层校验（7 发行版全绿）；
-- `examples/business/` — `/server` 业务目录树 + systemd unit + 常驻服务（起 nginx 并验证 8080 由该进程持有）；
+- `examples/business/` — **生产主线**：proxysss 网关（`/server` 树 + unit + 真启动，校验 8080 归属、check-config、静态站、admin:7777），7 发行版全绿；
+- `examples/prod/` — 最小业务：proxysss 静态站 + deploy 用户 + 备份 cron；
+- `examples/deep/` — nginx 三系路径差异参考（sites-enabled / conf.d / http.d）+ `nginx -T` 程序层校验，适用于仍跑 nginx 的旧机器；
 - `examples/negative/` — 故意写错路径与缺失命令，用于验证 FAIL 与退出码。
 
 ## matrix.json（选哪些发行版）
@@ -112,7 +117,7 @@ python --version                                        # 3.10+，无第三方�
 - `commands`：`command -v` 级别的可执行性校验。
 - `checks`：容器内 `sh -c` 执行的任意校验命令，退出 0 记 PASS；用来验程序层（如 `nginx -T`、`curl` 打业务端口）。
 - `per_distro` 支持键：`packages`（合并去重）、`files`、`dirs`、`units`、`services`、`users`、`groups`、`cron`、`commands`、`checks`。
-- `src_root`：`files/dirs/units` 的统一基准目录（相对仓库根或绝对路径），用于把仓库外的真实业务树接进来。
+- `src_root`：`dirs` 的基准目录（相对仓库根或绝对路径），用于把仓库外的真实 `/server` 副本接进来；`files/units` 仍相对计划目录，保证计划可移植。
 
 ## 校验项类型（guest/verify.sh 自动判定）
 
@@ -134,8 +139,8 @@ python --version                                        # 3.10+，无第三方�
 
 ## 重要限制（不要过度解读）
 
-- 容器**无 systemd、无内核、无真实网卡**：`units` 只验文件与语法（镜像内通常无 `systemd-analyze`，退化为结构校验）；`svc` 验证的是「进程起来了 + 端口 LISTEN 且归属该进程」，不验证 systemd 托管、开机自启、日志落盘策略。需要 systemd 行为时见 `references/workflow.md`。
-- **业务二进制是最大的坑**：Rust/Go/C++ 产物常有 glibc 版本下限。实测 proxysss v1.3.9 linux-amd64 要求 `GLIBC_2.38/2.39`，在 Ubuntu 24.04 可跑，Debian 12(2.36)、Ubuntu 22.04(2.35)、Alma/Rocky 9(2.34) 全部 `GLIBC_x not found`，Alpine(musl) 直接 `not found`。详见 `references/business-stack.md`。
+- 容器**无 systemd、无内核、无真实网卡**：矩阵里 `units` 只验文件与语法/结构，`svc` 验「进程起来 + 端口 LISTEN 且归属该进程」。**真实目标机经 `prod_deploy` 部署时启用 systemd 托管**（`enable --now` + `MainPID` 取 pid + cron reload），并自动备份、可回滚；开机自启在目标机由 unit 的 `[Install]` 生效。
+- **业务二进制**：proxysss v1.3.15+ 为全静态 ELF，7 发行版（含 Alpine/musl）实测全绿。老版本（如 v1.3.9）动态链接 glibc 2.39，只能在 Ubuntu 24.04 跑——历史实测与修法见 `references/business-stack.md`。
 - 想验证「程序真的加载了配置」用 `checks`（如 `nginx -T | grep`）；只靠 `file:` 校验只能证明文件落盘，不能证明被加载。
 - cron 在容器内只验证定义写入实际生效路径（Alpine 为 `/etc/crontabs/root`，其余为 `/etc/cron.d`）；真实服务器上由 cron 守护进程加载执行。
 - 安装需要容器出网（apt/dnf/apk 更新源）；离线环境先在 `matrix.json` 里关闭安装类检查。

@@ -104,18 +104,57 @@ def main():
             cur_vers.append(v.replace("GLIBC_", ""))
     flush_bin()
 
+    # --- 业务 unit：原文落盘 + 派生 units/services（ExecStart/WorkingDirectory）---
+    units = []
+    services = []
+    out_dir = (ROOT / args.out).parent
+    cur_name, cur_lines = None, []
+
+    def flush_unit():
+        if not cur_name or not cur_lines:
+            return
+        content = "\n".join(cur_lines).strip() + "\n"
+        ud = out_dir / "units"
+        ud.mkdir(parents=True, exist_ok=True)
+        (ud / cur_name).write_bytes(content.encode())
+        units.append({"src": f"units/{cur_name}", "name": cur_name,
+                      "dest": f"/etc/systemd/system/{cur_name}"})
+        exec_start = wd = ""
+        for ln in cur_lines:
+            if ln.startswith("ExecStart="):
+                exec_start = ln[len("ExecStart="):].strip()
+            elif ln.startswith("WorkingDirectory="):
+                wd = ln[len("WorkingDirectory="):].strip()
+        if exec_start:
+            svc_name = cur_name[:-8] if cur_name.endswith(".service") else cur_name
+            start = f"cd {wd} && {exec_start}" if wd else exec_start
+            services.append({"name": svc_name, "start": start, "stop": "", "port": "", "wait": 5})
+
+    for line in sections.get("UNIT FILES", []):
+        s = line.rstrip()
+        if s.startswith("-- "):
+            flush_unit()
+            cur_name = Path(s[3:].strip()).name
+            cur_lines = []
+            continue
+        if cur_name:
+            cur_lines.append(s)
+    flush_unit()
+
     plan = {
         "packages": packages,
         "files": [],
         "dirs": dirs,
+        "units": units,
+        "services": services,
         "groups": groups,
         "users": users,
         "cron": cron,
         "commands": [],
         "checks": checks,
         "per_distro": {},
-        "_note": ("由 plan_from_snapshot.py 生成；请人工补 files（配置文件）、units（systemd unit）、"
-                  "services（启动命令 + 端口）、commands；dirs 的 src 需把源机 /server 拷到计划目录下"
+        "_note": ("由 plan_from_snapshot.py 生成；请人工补 files（配置文件）、commands，"
+                  "给 services 补 port（监听端口）与 stop；dirs 的 src 需把源机 /server 拷到计划目录下"
                   "（或设置 src_root 指向本地副本）"),
     }
     if libc_floor:
@@ -124,10 +163,10 @@ def main():
     out = ROOT / args.out
     out.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"已写入 {out}：{len(packages)} 包 / {len(users)} 用户 / {len(cron)} cron / "
-          f"{len(dirs)} 目录树 / {len(checks)} 二进制兼容检查")
+          f"{len(dirs)} 目录树 / {len(units)} unit / {len(services)} 服务 / {len(checks)} 二进制兼容检查")
     if libc_floor:
-        print(f"业务二进制最高要求 glibc {libc_floor}——目标机必须 >= 该版本，否则换 musl 静态产物或容器化。")
-    print("提醒：配置文件、units、services（启动方式与端口）、防火墙规则需人工补充；packages 可按需要裁剪。")
+        print(f"业务二进制最高要求 glibc {libc_floor}——目标机必须 >= 该版本，否则换静态产物（proxysss v1.3.15+ 已静态）或容器化。")
+    print("提醒：配置文件、services 的 port/stop、防火墙规则需人工补充；packages 可按需要裁剪。")
 
 
 if __name__ == "__main__":

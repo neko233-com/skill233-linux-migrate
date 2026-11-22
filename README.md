@@ -1,19 +1,27 @@
 # skill233-linux-migrate · 本机 Compose 矩阵验证服务器迁移
 
 **只搬软件、不换 OS**：在本机用 Kiri / Docker Compose 拉起 Debian、Ubuntu、CentOS(Stream)、Rocky、Alma、Alpine 容器矩阵，
-**不碰生产**先把源机软件栈（包、配置、用户、cron）复刻方案跑一遍，找出包名 / 服务名 / 路径 / 防火墙差异，再上真实服务器。
+**不碰生产**先把源机软件栈（包、配置、用户、cron、`/server` 业务树、systemd unit、常驻服务）复刻方案跑一遍，
+找出包名 / 服务名 / 路径 / 二进制兼容差异；全绿后经 `prod_deploy` 把**同一份计划**部署到真实目标机（自动备份 + 原地校验 + 一键回滚）。
+
+业务主线用 **proxysss 替代 nginx**（`neko233-com/proxysss`，v1.3.15+ 全静态 ELF，7 发行版通用）。
 
 ## 快速开始
 
 ```bash
-python scripts/snapshot.sh  # (可选) 在源服务器采集基线，拷回 snapshot/source.txt
-python scripts/plan_from_snapshot.py   # 快照 → plan/migration.json（或 matrix.py init 手写）
-python scripts/matrix.py all       # up → apply → verify → report
-python scripts/matrix.py down      # 清理容器
+python scripts/fetch_proxysss.py         # 从你的 GitHub Release 拉 proxysss，组装 /server 业务树
+python scripts/matrix.py all --plan examples/business/plan.json   # 7 发行版验证
+python scripts/prod_deploy.py --plan examples/business/plan.json \
+    --transport docker --container lm-ubuntu-noble                # 不碰真机预演生产路径
+python scripts/prod_deploy.py --plan examples/business/plan.json \
+    --transport ssh --target root@<火山EIP>                        # 真实目标机部署
+python scripts/prod_deploy.py --transport ssh --target root@<火山EIP> --rollback  # 回滚
+python scripts/matrix.py down            # 清理容器
 ```
 
-报告输出到 `report/migration-report.md`；有 FAIL 时命令退出码为 1。
-自定义计划：`python scripts/matrix.py all --plan examples/deep/plan.json`。
+源机有存量环境时：`scripts/snapshot.sh` 采基线 → `scripts/plan_from_snapshot.py` 直出计划
+（包/用户/cron/`/server` 树/unit 原文+派生服务/glibc 兼容检查自动带出）。
+报告输出到 `report/migration-report.md`（矩阵）与 `report/target-report.md`（目标机）；有 FAIL 时退出码为 1。
 切换计划前先 `python scripts/matrix.py reset`（down + up），避免上一轮服务残留占端口。
 
 ## 矩阵（matrix.json 全部默认启用，7 个发行版）
@@ -34,9 +42,9 @@ python scripts/matrix.py down      # 清理容器
 
 | 目录 | 用途 |
 | --- | --- |
-| `examples/prod/` | 最小可跑：nginx 站点 + deploy 用户 + 备份 cron |
-| `examples/deep/` | 深验：双用户组、双 cron、**三系 nginx 路径差异**（sites-enabled / conf.d / http.d）+ `nginx -T` 程序层校验 |
-| `examples/business/` | 业务栈：`/server` 目录树 + systemd unit + 常驻服务（起 nginx，校验 8080 由该进程持有） |
+| `examples/business/` | **生产主线**：proxysss 网关（`/server` 树 + unit + 真启动；校验端口归属、check-config、静态站、admin:7777），7 发行版 × 8 项全绿 |
+| `examples/prod/` | 最小业务：proxysss 静态站 + deploy 用户 + 备份 cron，7 发行版全绿 |
+| `examples/deep/` | nginx 三系路径差异参考（sites-enabled / conf.d / http.d）+ `nginx -T` 程序层校验，适用于仍跑 nginx 的旧机器 |
 | `examples/negative/` | 负例：故意写错路径与缺失命令，验证 FAIL 与退出码 1 |
 
 ## 计划格式 `plan/migration.json`
@@ -71,16 +79,26 @@ python scripts/matrix.py down      # 清理容器
 
 ## 实测结论（真实业务二进制）
 
-用 proxysss v1.3.9 linux-amd64（21.8MB，动态 glibc）跑 7 发行版：
+**proxysss v1.3.15（全静态 ELF，22.9MB）：7 发行版 × 8 项全绿**，含 Alpine/musl——
+`--version`、`check-config`、静态站回包、admin:7777 监听、8080 端口归属进程全部通过。
 
-| 发行版 | glibc | 结果 |
-| --- | --- | --- |
-| Ubuntu 24.04 | 2.39 | PASS（8080 + admin:7777 均监听，HTTP 可达） |
-| Debian 12 / Ubuntu 22.04 / Rocky 9 / Alma 9 / Stream 9 | 2.36 / 2.35 / 2.34 | FAIL：`GLIBC_2.38/2.39 not found` |
-| Alpine 3.20 | musl | FAIL：`not found` |
-
+历史对照：v1.3.9 linux-amd64 为动态 glibc 产物（要求 GLIBC_2.38/2.39），仅 Ubuntu 24.04 可跑，
+Debian 12 / Ubuntu 22.04 / Rocky / Alma / Stream 9 全部 `GLIBC_x not found`，Alpine `not found`。
 **包全装上、文件全落对，业务照样起不来**——这就是必须做「服务启动 + 端口归属」验证的原因。
-修法见 `references/business-stack.md`（目标机选 Ubuntu 24.04 / 编 musl 静态产物 / 容器化部署）。
+详见 `references/business-stack.md`。
+
+## 生产部署（prod_deploy）
+
+矩阵全绿后，同一份计划直接上目标机，验过的就是部署的：
+
+1. 自动识别目标发行版（os-release），按 `per_distro` 合并计划；
+2. 备份将被覆盖的文件/目录/cron/unit 到 `/var/backups/linuxmig-<ts>`（清单化）；
+3. `USE_SYSTEMD=1` 执行：unit `enable --now`、服务由 systemd 托管（MainPID 校验端口归属）、cron reload；
+4. 目标机原地跑同一套 `verify.sh`，出 `report/target-report.md`，FAIL 退出码 1；
+5. `--rollback`：停服务 → 按清单还原（部署前不存在的删除，存在的恢复）→ daemon-reload。
+
+不碰真机预演：`--transport docker --container lm-<distro>`，走与生产完全相同的代码路径
+（已在 ubuntu-noble 与 alpine-320 实测部署 8/8 + 回滚还原）。
 
 ## 作为 Agent Skill 使用
 

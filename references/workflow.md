@@ -79,8 +79,24 @@ volumes:
 ```
 
 本技能默认矩阵不启用该模式，仅在需要验证 `systemctl enable` 类步骤时手工切换。
+**推荐路径**：直接用 `prod_deploy` 在真实目标机执行（自动走 systemd 托管），无需 systemd-in-docker。
 
-## 6. 上生产前收尾清单
+## 6. 生产部署（prod_deploy）
+
+矩阵全绿后，把同一份计划部署到目标机并原地校验：
+
+```bash
+python scripts/prod_deploy.py --plan examples/business/plan.json --transport ssh --target root@<EIP>
+python scripts/prod_deploy.py --transport ssh --target root@<EIP> --rollback   # 失败回滚
+python scripts/prod_deploy.py --plan examples/business/plan.json --transport docker --container lm-ubuntu-noble  # 本机预演
+```
+
+- 自动备份到 `/var/backups/linuxmig-<ts>`（file/dir/cron/unit 清单化），回滚按清单还原；
+- 目标机有 systemd 时 unit `enable --now`、服务由 systemd 托管、cron reload；
+- 目标机原地跑同一套 verify，报告 `report/target-report.md`，FAIL 退出码 1；
+- 发行版自动识别（os-release），`--distro` 可强制指定 per_distro 合并键。
+
+## 7. 上生产前收尾清单
 
 1. 目标机 OS 版本已确认（不要把 EOL 的 CentOS 7 当新机器）。
 2. 包清单在矩阵全绿；配置文件内容已逐文件核对。

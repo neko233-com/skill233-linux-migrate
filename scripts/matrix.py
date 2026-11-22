@@ -128,11 +128,12 @@ def make_tar(src: Path, tar_path: Path):
                 tf.addfile(ti, fh)
 
 
-def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR) -> Path:
+def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR, dirs_base: Path = None) -> Path:
     d = OUT / "plan" / distro_name
     shutil.rmtree(d, ignore_errors=True)
     files_d = d / "files"
     files_d.mkdir(parents=True)
+    dirs_base = dirs_base or base_dir
 
     env_lines = []
     env_lines.append(f'PKGS="{" ".join(merged["packages"])}"')
@@ -147,9 +148,9 @@ def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR) -> Pa
         env_lines.append(f'FILE{i}_DEST={shq(f["dest"])}')
         env_lines.append(f'FILE{i}_CONTAINS={shq(f.get("contains", ""))}')
 
-    # 目录树：打成 tar，容器内解包（保留结构，文件 0755）
+    # 目录树：打成 tar，容器内解包（保留结构，文件 0755）；src_root 只影响 dirs
     for i, dd in enumerate(merged.get("dirs", [])):
-        src = Path(dd["src"]) if Path(dd["src"]).is_absolute() else base_dir / dd["src"]
+        src = Path(dd["src"]) if Path(dd["src"]).is_absolute() else dirs_base / dd["src"]
         if not src.exists():
             raise SystemExit(f"dirs[{i}] 源目录不存在: {src}")
         make_tar(src, d / "dirs" / f"{i}.tar")
@@ -233,16 +234,17 @@ def cmd_apply(args):
     matrix = load_json(ROOT / "matrix.json")
     plan = load_plan(args)
     plan_base = (ROOT / args.plan).parent if getattr(args, "plan", None) else PLAN_DIR
-    # 业务目录可能放在仓库外（真实 /server 副本），src_root 允许绝对/相对仓库根
+    # src_root 只改 dirs 的基准（真实 /server 副本可在仓库外）；files/units 仍相对计划目录
+    dirs_base = plan_base
     if plan.get("src_root"):
-        plan_base = Path(plan["src_root"])
-        if not plan_base.is_absolute():
-            plan_base = ROOT / plan_base
+        dirs_base = Path(plan["src_root"])
+        if not dirs_base.is_absolute():
+            dirs_base = ROOT / dirs_base
     distros = enabled_distros(matrix, set(parse_only(args)))
     for d in distros:
         name = d["name"]
         merged = merge_plan(name, plan)
-        mdir = materialize(name, merged, plan_base)
+        mdir = materialize(name, merged, plan_base, dirs_base)
         cname = container_name(d)
         run(["docker", "exec", cname, "rm", "-rf", f"/tmp/plan-{name}"], check=False)
         # mdir/. 复制目录内容到目标，避免 docker cp 把源目录套成子目录

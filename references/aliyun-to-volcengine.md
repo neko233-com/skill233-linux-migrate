@@ -55,24 +55,27 @@
 
 ## 5. 服务与端口核对
 
-- 目标机软件栈验证通过后，逐个确认业务进程能起（矩阵不验证 systemd 启停）。
+- 矩阵已验证业务进程真能起、端口归属正确（`svc:` 检查）；目标机经 `prod_deploy` 部署后由 systemd 托管并原地复验。
+- 业务网关用 proxysss（替代 nginx）：`fetch_proxysss.py` 拉 v1.3.15+ 静态产物，7 发行版通用；80/443 + UDP 443（H3）+ admin 127.0.0.1:7777 按 `business-stack.md` 清单核对。
 - 本地防火墙：旧机 ufw/iptables 规则**不照搬**，按目标安全组策略重写。
 - 外部回调/白名单：支付、短信、OAuth 回调里写死的旧 IP 要改成新 EIP。
 
 ## 6. 切流与回滚
 
-1. 观察期前：旧机只读、新机备用，rsync 做最后增量。
-2. 切流：DNS 切到新 EIP；保留旧机运行。
-3. 观察 7–15 天：看日志、错误率、业务上报；异常则 DNS 切回（TTL 已调低，生效快）。
-4. 确认稳定后释放旧 EIP 与旧机，销毁阿里云实例。
+1. 目标机部署：`python scripts/prod_deploy.py --plan <plan> --transport ssh --target root@<火山EIP>`（自动备份 + 原地校验）；失败 `--rollback` 恢复。
+2. 观察期前：旧机只读、新机备用，rsync 做最后增量。
+3. 切流：DNS 切到新 EIP；保留旧机运行。
+4. 观察 7–15 天：看日志、错误率、业务上报；异常则 DNS 切回（TTL 已调低，生效快），目标机必要时 `--rollback`。
+5. 确认稳定后释放旧 EIP 与旧机，销毁阿里云实例。
 
 ## 7. 切前检查清单（逐项打勾）
 
 - [ ] 软件栈矩阵报告全 PASS
+- [ ] `prod_deploy` 目标机报告全 PASS（report/target-report.md）
 - [ ] 站点/应用文件 rsync 完成并校验（`rsync -avn` 干跑比对）
 - [ ] 数据库导出/导入完成，行数抽样核对
-- [ ] cron 任务全部在 `/etc/cron.d`
+- [ ] cron 任务全部在 `/etc/cron.d`（Alpine 为 /etc/crontabs/root 标记块）
 - [ ] 业务用户/组已建
 - [ ] 安全组、EIP、VPC 就绪
 - [ ] DNS TTL 已调低
-- [ ] 回滚方案：旧机保留、DNS 切回路径明确
+- [ ] 回滚方案：旧机保留、DNS 切回路径明确、目标机 `--rollback` 已预演

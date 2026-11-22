@@ -1,7 +1,0 @@
-#!/bin/sh
-# 示例用占位二进制：真实迁移时把 /server/proxysss/proxysss 换成 release 产物
-# 这里只用于验证 unit 的 ExecStart 路径存在 + 可执行
-case "$1" in
-  --version|-V) echo "proxysss 1.3.9 (placeholder)"; exit 0 ;;
-esac
-echo "proxysss placeholder: config=$2"

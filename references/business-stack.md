@@ -78,7 +78,12 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 配套：`matrix.py reset`（down + up）。换 plan 前必须重置，否则残留服务会污染端口。
 
-## 4. 实测：proxysss v1.3.9 的 glibc 地狱（重点）
+## 4. 二进制兼容：v1.3.15 已解决，老版本是 glibc 地狱（历史实测）
+
+**现状：proxysss v1.3.15+ 的 linux-amd64 产物是全静态 ELF（无 PT_INTERP），7 发行版含 Alpine/musl 实测全绿。**
+用 `python scripts/fetch_proxysss.py` 直接从 `neko233-com/proxysss` 的 Release 拉取组装，不要再用老动态产物。
+
+以下为 v1.3.9 的历史实测，说明为什么迁移必须验「服务真能起来」：
 
 样本：`proxysss-linux-amd64`，21.8MB，动态链接，interp `/lib64/ld-linux-x86-64.so.2`。
 
@@ -95,10 +100,11 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 处置优先级：
 
-1. **目标机选 Ubuntu 24.04**（与构建环境一致）——已验证可行。
-2. **重编静态 musl**：`cargo build --release --target x86_64-unknown-linux-musl`，产物可在 Debian/Ubuntu/RHEL/Alpine 全部跑（最省心的跨发行版方案）。
-3. **容器化部署**：把 proxysss 打进镜像，宿主机只装 docker/podman，宿主 glibc 版本与业务无关（迁移时只需搬 compose + 数据卷）。
-4. 兼容层（Alpine `gcompat`、老系统升 glibc）不推荐：升级 glibc 会连带炸系统包。
+1. **升级到 v1.3.15+ 静态产物**（`fetch_proxysss.py` 一键拉取）——已验证 7 发行版全绿，首选。
+2. 必须用老动态产物时：目标机选 Ubuntu 24.04（与构建环境 glibc 一致）。
+3. 自行编译静态 musl：`cargo build --release --target x86_64-unknown-linux-musl`。
+4. 容器化部署：把 proxysss 打进镜像，宿主 glibc 版本与业务无关。
+5. 兼容层（Alpine `gcompat`、老系统升 glibc）不推荐：升级 glibc 会连带炸系统包。
 
 自检一行（迁移前在目标机跑）：
 
@@ -143,3 +149,29 @@ python scripts/matrix.py report
   { "name": "admin-port-7777", "cmd": "awk -v pat='1E61' 'FNR>1{split($2,a,\":\"); if(toupper(a[2])==pat && $4==\"0A\") f=1} END{exit !f}' /proc/net/tcp" }
 ]
 ```
+
+## 7. 生产部署与回滚（prod_deploy）
+
+矩阵全绿后，`scripts/prod_deploy.py` 把**同一份物化计划**送到目标机执行，验过的就是部署的：
+
+```powershell
+# 真实目标机（火山引擎 ECS）
+python scripts/prod_deploy.py --plan examples/business/plan.json --transport ssh --target root@<EIP>
+# 失败回滚（停服务 → 按备份清单还原 → daemon-reload）
+python scripts/prod_deploy.py --transport ssh --target root@<EIP> --rollback
+# 不碰真机预演（与生产同一代码路径，已在 noble/alpine 实测）
+python scripts/prod_deploy.py --plan examples/business/plan.json --transport docker --container lm-ubuntu-noble
+```
+
+目标机侧行为（`guest/target_apply.sh`）：
+
+1. 备份将被覆盖的 file/dir/cron/unit 到 `/var/backups/linuxmig-<ts>`，清单 `manifest.tsv`（不存在记 MISSING）；
+2. `USE_SYSTEMD=1` 调 `apply.sh`：unit `systemctl enable --now`，服务由 systemd 托管（`MainPID` 写入 pid 文件供端口归属校验），cron `reload crond/cron`（Alpine 走 `rc-service crond restart`）；
+3. Alpine 的 `/etc/crontabs/root` 只重建 `# BEGIN/END linuxmig` 标记块，**用户既有 cron 保留**；
+4. 原地跑 `verify.sh` → `report/target-report.md`，FAIL 退出码 1。
+
+回滚（`guest/target_rollback.sh`）：先停本次部署的服务（systemctl stop / stop 命令 / pid kill），
+再按清单还原：MISSING 的删除（unit 先 `disable --now`），存在的恢复；目录整树 tar 还原。
+
+注意：目标机部署需要 root（或等效权限）；SSH 密钥/安全组 22 端口自行保证。
+`--distro` 可显式指定 per_distro 合并键，缺省按 os-release 自动识别。

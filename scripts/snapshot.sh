@@ -69,6 +69,16 @@ for b in $(find /server -maxdepth 3 -type f -perm -u+x 2>/dev/null | head -20); 
   strings "$b" 2>/dev/null | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3 | tee -a "$OUT_DIR/source.txt"
 done
 
+# --- 业务 systemd unit 原文（ExecStart 引用 /server 的自定义 unit）---
+echo "" | tee -a "$OUT_DIR/source.txt"
+echo "== UNIT FILES ==" | tee -a "$OUT_DIR/source.txt"
+for u in /etc/systemd/system/*.service; do
+  [ -f "$u" ] || continue
+  grep -q '/server' "$u" 2>/dev/null || continue
+  echo "-- $u" | tee -a "$OUT_DIR/source.txt"
+  cat "$u" | tee -a "$OUT_DIR/source.txt"
+done
+
 # --- 防火墙 ---
 echo "" | tee -a "$OUT_DIR/source.txt"
 echo "== FIREWALL ==" | tee -a "$OUT_DIR/source.txt"

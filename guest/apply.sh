@@ -108,6 +108,20 @@ for u in ${USERLIST:-}; do
   ensure_user "$name" "$grp"
 done
 
+# --- systemd 集成（仅真实目标机：USE_SYSTEMD=1 且 systemd 在跑；容器内不启用）---
+SYSTEMD_ACTIVE=0
+if [ "${USE_SYSTEMD:-0}" = 1 ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  SYSTEMD_ACTIVE=1
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  i=0
+  while true; do
+    eval "un=\${UNIT${i}_NAME:-}"
+    [ -z "$un" ] && break
+    systemctl enable --now "$un" >/dev/null 2>&1 || echo "[apply] enable $un 失败"
+    i=$((i + 1))
+  done
+fi
+
 # --- 业务服务启动（后台常驻，日志/pid 落 /tmp）---
 listening_inodes() {
   p="$1"
@@ -145,25 +159,35 @@ while true; do
   eval "sport=\${SVC${i}_PORT:-}"
   eval "swait=\${SVC${i}_WAIT:-5}"
 
-  [ -n "$sstop" ] && sh -c "$sstop" >/dev/null 2>&1
   rm -f "/tmp/svc-$sname.pid"
+  managed=0
+  [ "$SYSTEMD_ACTIVE" = 1 ] && systemctl cat "$sname.service" >/dev/null 2>&1 && managed=1
 
-  # 生成启动脚本（避免引号地狱；脚本自行记录 pid，随后 exec 保持同一 pid）
-  script="/tmp/svc-$sname.sh"
-  {
-    echo '#!/bin/sh'
-    echo "echo \$\$ > /tmp/svc-$sname.pid"
-    echo "$sstart"
-  } > "$script"
-  chmod +x "$script"
-
-  # setsid -f 优先（脱离会话），busybox 无 setsid 时退回 nohup
-  if setsid -f true >/dev/null 2>&1; then
-    setsid -f "$script" >"/tmp/svc-$sname.log" 2>&1
-  elif command -v setsid >/dev/null 2>&1; then
-    setsid "$script" >"/tmp/svc-$sname.log" 2>&1 &
+  if [ "$managed" = 1 ]; then
+    # 目标机由 systemd unit 托管：restart 并取 MainPID，不走后台脚本
+    systemctl restart "$sname.service" >/dev/null 2>&1 || true
+    mp=$(systemctl show -p MainPID --value "$sname.service" 2>/dev/null)
+    [ -n "$mp" ] && [ "$mp" != 0 ] && echo "$mp" > "/tmp/svc-$sname.pid"
   else
-    nohup "$script" >"/tmp/svc-$sname.log" 2>&1 &
+    [ -n "$sstop" ] && sh -c "$sstop" >/dev/null 2>&1
+
+    # 生成启动脚本（避免引号地狱；脚本自行记录 pid，随后 exec 保持同一 pid）
+    script="/tmp/svc-$sname.sh"
+    {
+      echo '#!/bin/sh'
+      echo "echo \$\$ > /tmp/svc-$sname.pid"
+      echo "$sstart"
+    } > "$script"
+    chmod +x "$script"
+
+    # setsid -f 优先（脱离会话），busybox 无 setsid 时退回 nohup
+    if setsid -f true >/dev/null 2>&1; then
+      setsid -f "$script" >"/tmp/svc-$sname.log" 2>&1
+    elif command -v setsid >/dev/null 2>&1; then
+      setsid "$script" >"/tmp/svc-$sname.log" 2>&1 &
+    else
+      nohup "$script" >"/tmp/svc-$sname.log" 2>&1 &
+    fi
   fi
 
   # 等端口就绪，并把 pid 校正为真正的 listener
@@ -198,7 +222,17 @@ done
 
 if [ "$have_cron" = 1 ]; then
   mkdir -p "$(dirname "$CRON_FILE")"
-  : > "$CRON_FILE" # 重建，避免重复追加
+  case "$CRON_FILE" in
+    /etc/crontabs/*)
+      # Alpine：/etc/crontabs/root 可能有用户既有任务，只重建 linuxmig 标记块，其余保留
+      tmp="$CRON_FILE.tmp"
+      awk '/^# BEGIN linuxmig$/{skip=1;next} /^# END linuxmig$/{skip=0;next} !skip' \
+        "$CRON_FILE" > "$tmp" 2>/dev/null || : > "$tmp"
+      mv "$tmp" "$CRON_FILE"
+      echo "# BEGIN linuxmig" >> "$CRON_FILE"
+      ;;
+    *) : > "$CRON_FILE" ;; # /etc/cron.d/linuxmig 是本工具专属文件，全量重建
+  esac
   i=0
   while true; do
     eval "expr=\${CRON${i}_EXPR:-}"
@@ -210,7 +244,19 @@ if [ "$have_cron" = 1 ]; then
     esac
     i=$((i + 1))
   done
+  case "$CRON_FILE" in
+    /etc/crontabs/*) echo "# END linuxmig" >> "$CRON_FILE" ;;
+  esac
   chmod 644 "$CRON_FILE" 2>/dev/null || true
+fi
+
+# 目标机：让 cron 守护进程加载新定义（容器内无守护进程，跳过）
+if [ "${USE_SYSTEMD:-0}" = 1 ]; then
+  if [ "$SYSTEMD_ACTIVE" = 1 ]; then
+    systemctl reload crond >/dev/null 2>&1 || systemctl reload cron >/dev/null 2>&1 || true
+  elif command -v rc-service >/dev/null 2>&1; then
+    rc-service crond restart >/dev/null 2>&1 || true
+  fi
 fi
 
 echo "apply done (PM=$PM, cron=$CRON_FILE)"
