@@ -4,6 +4,16 @@ set -u
 PLAN_DIR="$1"
 . "$PLAN_DIR/apply.env"
 
+# --- 阶段门控（Agent 分步编排用）：STAGES=all（默认）或逗号子集 ---
+# pkgs,files,dirs,units,users,attrs,databases,services,cron,firewall
+STAGES="${STAGES:-all}"
+CRON_FILE=""
+stage_on() {
+  [ "$STAGES" = "all" ] && return 0
+  case ",$STAGES," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
 # --- 探测包管理器 ---
 if command -v apt-get >/dev/null 2>&1; then PM=apt
 elif command -v dnf >/dev/null 2>&1; then PM=dnf
@@ -24,7 +34,7 @@ install_pkgs() {
   esac
 }
 
-if [ -n "${PKGS:-}" ] && [ "$PM" != "none" ]; then
+if stage_on pkgs && [ -n "${PKGS:-}" ] && [ "$PM" != "none" ]; then
   : > "$PKG_LOG"
   install_pkgs || {
     case "$PM" in
@@ -37,6 +47,7 @@ if [ -n "${PKGS:-}" ] && [ "$PM" != "none" ]; then
 fi
 
 # --- 落配置文件 ---
+if stage_on files; then
 i=0
 while true; do
   eval "dest=\${FILE${i}_DEST:-}"
@@ -45,8 +56,10 @@ while true; do
   cp "$PLAN_DIR/files/$i" "$dest" 2>/dev/null || true
   i=$((i + 1))
 done
+fi
 
 # --- 业务目录树（tar 解包，保留结构）---
+if stage_on dirs; then
 i=0
 while true; do
   eval "dest=\${DIR${i}_DEST:-}"
@@ -56,8 +69,10 @@ while true; do
     echo "[apply] 解包失败: $PLAN_DIR/dirs/$i.tar -> $dest"
   i=$((i + 1))
 done
+fi
 
 # --- systemd unit 文件落盘 ---
+if stage_on units; then
 i=0
 while true; do
   eval "uname_=\${UNIT${i}_NAME:-}"
@@ -69,6 +84,7 @@ while true; do
   fi
   i=$((i + 1))
 done
+fi
 
 # --- 组/用户（awk 读文件，兼容 busybox 无 getent）---
 has_group() { awk -F: -v g="$1" '$1==g{f=1} END{exit !f}' /etc/group 2>/dev/null; }
@@ -101,12 +117,163 @@ ensure_user() {
   echo "$name:x:$uid:${gid}::/home/$name:/usr/sbin/nologin" >> /etc/passwd
 }
 
+if stage_on users; then
 for g in ${GROUPLIST:-}; do ensure_group "$g"; done
 for u in ${USERLIST:-}; do
   name=${u%%:*}; grp=${u#*:}
   [ -z "$grp" ] && grp="$name"
   ensure_user "$name" "$grp"
 done
+fi
+
+# --- 属主/权限还原（必须在用户/组创建之后；不再统一 0755）---
+set_attrs() { # path owner group mode
+  p="$1"; o="$2"; g="$3"; m="$4"
+  [ -e "$p" ] || return 0
+  if [ -n "$o" ] || [ -n "$g" ]; then
+    chown "${o:-root}:${g:-root}" "$p" 2>/dev/null || true
+  fi
+  [ -n "$m" ] && chmod "$m" "$p" 2>/dev/null || true
+}
+if stage_on attrs; then
+i=0
+while true; do
+  eval "dest=\${FILE${i}_DEST:-}"; [ -z "$dest" ] && break
+  eval "o=\${FILE${i}_OWNER:-}"; eval "g=\${FILE${i}_GROUP:-}"; eval "m=\${FILE${i}_MODE:-}"
+  set_attrs "$dest" "$o" "$g" "$m"
+  i=$((i + 1))
+done
+i=0
+while true; do
+  eval "dest=\${DIR${i}_DEST:-}"; [ -z "$dest" ] && break
+  eval "o=\${DIR${i}_OWNER:-}"; eval "g=\${DIR${i}_GROUP:-}"
+  if [ -n "$o" ] || [ -n "$g" ]; then
+    chown -R "${o:-root}:${g:-root}" "$dest" 2>/dev/null || true
+  fi
+  if [ -f "$PLAN_DIR/dirs/$i.attrs" ]; then
+    while IFS='|' read -r ap am ao ag; do
+      [ -z "$ap" ] && continue
+      set_attrs "$dest/$ap" "$ao" "$ag" "$am"
+    done < "$PLAN_DIR/dirs/$i.attrs"
+  fi
+  i=$((i + 1))
+done
+fi
+
+# --- 数据库迁移：装包 → 初始化 → 起守护 → 恢复 dump → 建账号 ---
+# 容器内无 systemd，用直控守护进程（pg_ctl / mariadbd-safe / redis-server）；
+# 目标机同样适用。连接信息落 /tmp/linuxmig-* 供 verify.sh 复用。
+DB_LOG=/tmp/linuxmig-db.log
+: > "$DB_LOG"
+pkgs_install() {
+  list="$1"; [ -z "$list" ] && return 0
+  case "$PM" in
+    apt) apt-get update -y >>"$DB_LOG" 2>&1
+         DEBIAN_FRONTEND=noninteractive apt-get install -y $list >>"$DB_LOG" 2>&1 ;;
+    dnf) dnf install -y $list >>"$DB_LOG" 2>&1 || dnf install -y --allowerasing $list >>"$DB_LOG" 2>&1 ;;
+    yum) yum install -y $list >>"$DB_LOG" 2>&1 ;;
+    apk) apk add --no-cache $list >>"$DB_LOG" 2>&1 ;;
+  esac
+}
+find_pgbin() {
+  for d in /usr/lib/postgresql/*/bin /usr/pgsql-*/bin /usr/lib/postgresql*/bin /usr/bin; do
+    [ -x "$d/pg_ctl" ] && { echo "$d"; return 0; }
+  done
+  return 1
+}
+
+db_postgres() {
+  name="$1"; dump="$2"; dbuser="$3"; dbpass="$4"; pkgs="$5"; port="$6"
+  [ -z "$port" ] && port=5432
+  if [ -z "$pkgs" ]; then
+    case "$PM" in
+      apt) pkgs="postgresql" ;;
+      dnf|yum) pkgs="postgresql-server postgresql" ;;
+      apk) pkgs="postgresql16 postgresql16-client" ;;
+    esac
+  fi
+  pkgs_install "$pkgs"
+  pgbin=$(find_pgbin) || { echo "[db] pg_ctl not found" >>"$DB_LOG"; return 1; }
+  echo "$pgbin" > /tmp/linuxmig-pgbin
+  echo "$port" > /tmp/linuxmig-pgport
+  datadir=/var/lib/linuxmig-pg
+  mkdir -p "$datadir"; chown postgres:postgres "$datadir" 2>/dev/null
+  [ -f "$datadir/PG_VERSION" ] || \
+    su -s /bin/sh postgres -c "$pgbin/initdb -D $datadir -E UTF8" >>"$DB_LOG" 2>&1
+  su -s /bin/sh postgres -c "$pgbin/pg_ctl -D $datadir -l /tmp/linuxmig-pg.log -o '-k /tmp -p $port -c listen_addresses=127.0.0.1' -w start" >>"$DB_LOG" 2>&1
+  n=0; while [ ! -S "/tmp/.s.PGSQL.$port" ] && [ "$n" -lt 30 ]; do sleep 1; n=$((n+1)); done
+  su -s /bin/sh postgres -c "$pgbin/createdb -h /tmp -p $port $name" >>"$DB_LOG" 2>&1
+  [ -n "$dump" ] && su -s /bin/sh postgres -c "$pgbin/psql -h /tmp -p $port -d $name -f $PLAN_DIR/files/$dump" >>"$DB_LOG" 2>&1
+  if [ -n "$dbuser" ]; then
+    su -s /bin/sh postgres -c "$pgbin/psql -h /tmp -p $port -d $name -c \"CREATE USER $dbuser WITH PASSWORD '$dbpass'; GRANT ALL PRIVILEGES ON DATABASE $name TO $dbuser;\"" >>"$DB_LOG" 2>&1
+  fi
+}
+
+db_mariadb() {
+  name="$1"; dump="$2"; dbuser="$3"; dbpass="$4"; pkgs="$5"; port="$6"
+  [ -z "$port" ] && port=3306
+  if [ -z "$pkgs" ]; then
+    case "$PM" in
+      apt) pkgs="mariadb-server mariadb-client" ;;
+      dnf|yum) pkgs="mariadb-server mariadb" ;;
+      apk) pkgs="mariadb mariadb-client" ;;
+    esac
+  fi
+  pkgs_install "$pkgs"
+  cli=$(command -v mariadb || command -v mysql)
+  echo "$cli" > /tmp/linuxmig-mysql-client
+  sock=/tmp/linuxmig-mysql.sock
+  echo "$sock" > /tmp/linuxmig-mysql-sock
+  datadir=/var/lib/linuxmig-mysql
+  mkdir -p "$datadir"; chown mysql:mysql "$datadir" 2>/dev/null
+  # 容器无 systemd-tmpfiles：默认 pid 目录 /run/mysqld 不存在，建目录并显式覆盖 pid 路径
+  mkdir -p /run/mysqld 2>/dev/null; chown mysql:mysql /run/mysqld 2>/dev/null
+  install_db=$(command -v mariadb-install-db || command -v mysql_install_db)
+  [ -d "$datadir/mysql" ] || "$install_db" --user=mysql --datadir="$datadir" >>"$DB_LOG" 2>&1
+  daemon=$(command -v mariadbd-safe || command -v mysqld_safe)
+  # setsid -f 脱离会话（nohup & 会随 docker exec 结束被杀）；--pid-file 避开缺失的 /run/mysqld
+  setsid -f "$daemon" --datadir="$datadir" --socket="$sock" --pid-file=/tmp/linuxmig-mysql.pid --port="$port" --user=mysql --log-error=/tmp/linuxmig-mysql.err >/dev/null 2>&1 </dev/null
+  n=0; while [ ! -S "$sock" ] && [ "$n" -lt 60 ]; do sleep 1; n=$((n+1)); done
+  "$cli" --socket="$sock" -e "CREATE DATABASE IF NOT EXISTS $name;" >>"$DB_LOG" 2>&1
+  [ -n "$dump" ] && "$cli" --socket="$sock" "$name" < "$PLAN_DIR/files/$dump" >>"$DB_LOG" 2>&1
+  if [ -n "$dbuser" ]; then
+    "$cli" --socket="$sock" -e "CREATE USER IF NOT EXISTS '$dbuser'@'localhost' IDENTIFIED BY '$dbpass'; GRANT ALL ON $name.* TO '$dbuser'@'localhost'; FLUSH PRIVILEGES;" >>"$DB_LOG" 2>&1
+  fi
+}
+
+db_redis() {
+  name="$1"; dump="$2"; dbuser="$3"; dbpass="$4"; pkgs="$5"; port="$6"
+  [ -z "$port" ] && port=6379
+  if [ -z "$pkgs" ]; then
+    case "$PM" in
+      apt) pkgs="redis-server redis-tools" ;;
+      dnf|yum) pkgs="redis" ;;
+      apk) pkgs="redis" ;;
+    esac
+  fi
+  pkgs_install "$pkgs"
+  echo "$port" > /tmp/linuxmig-redis-port
+  redis-server --port "$port" --daemonize yes --dir /tmp --logfile /tmp/linuxmig-redis.log --bind 127.0.0.1 >>"$DB_LOG" 2>&1
+  n=0; while ! redis-cli -p "$port" ping >/dev/null 2>&1 && [ "$n" -lt 20 ]; do sleep 1; n=$((n+1)); done
+  [ -n "$dump" ] && redis-cli -p "$port" < "$PLAN_DIR/files/$dump" >>"$DB_LOG" 2>&1
+}
+
+if stage_on databases; then
+i=0
+while true; do
+  eval "dtype=\${DB${i}_TYPE:-}"; [ -z "$dtype" ] && break
+  eval "dname=\${DB${i}_NAME:-app}"; eval "ddump=\${DB${i}_DUMP:-}"
+  eval "duser=\${DB${i}_USER:-}"; eval "dpass=\${DB${i}_PASSWORD:-}"
+  eval "dpkgs=\${DB${i}_PKGS:-}"; eval "dport=\${DB${i}_PORT:-}"
+  case "$dtype" in
+    postgresql|postgres) db_postgres "$dname" "$ddump" "$duser" "$dpass" "$dpkgs" "$dport" ;;
+    mysql|mariadb)       db_mariadb "$dname" "$ddump" "$duser" "$dpass" "$dpkgs" "$dport" ;;
+    redis)               db_redis "$dname" "$ddump" "$duser" "$dpass" "$dpkgs" "$dport" ;;
+    *) echo "[db] unsupported type: $dtype" >>"$DB_LOG" ;;
+  esac
+  i=$((i + 1))
+done
+fi
 
 # --- systemd 集成（仅真实目标机：USE_SYSTEMD=1 且 systemd 在跑；容器内不启用）---
 SYSTEMD_ACTIVE=0
@@ -150,6 +317,7 @@ find_port_owner() {
   return 1
 }
 
+if stage_on services; then
 i=0
 while true; do
   eval "sname=\${SVC${i}_NAME:-}"
@@ -203,8 +371,10 @@ while true; do
   done
   i=$((i + 1))
 done
+fi
 
 # --- cron：全量重建，保证重复 apply 幂等 ---
+if stage_on cron; then
 CRON_FILE=/etc/cron.d/linuxmig
 if [ "$PM" = "apk" ] || { [ -d /etc/crontabs ] && [ ! -d /etc/cron.d ]; }; then
   CRON_FILE=/etc/crontabs/root
@@ -258,5 +428,49 @@ if [ "${USE_SYSTEMD:-0}" = 1 ]; then
     rc-service crond restart >/dev/null 2>&1 || true
   fi
 fi
+fi
 
-echo "apply done (PM=$PM, cron=$CRON_FILE)"
+# --- 防火墙：目标机真实应用；容器内无 netfilter 权限，落规则清单做结构校验 ---
+if stage_on firewall && [ -n "${FW_BACKEND:-}" ] && [ "${FW_BACKEND}" != "none" ]; then
+  FW_MAN=/tmp/linuxmig-firewall.manifest
+  {
+    echo "backend=$FW_BACKEND"
+    echo "default_input=${FW_DEFAULT_INPUT:-}"
+    for p in ${FW_TCP:-}; do echo "allow tcp $p"; done
+    for p in ${FW_UDP:-}; do echo "allow udp $p"; done
+    [ -f "$PLAN_DIR/fw_rules" ] && cat "$PLAN_DIR/fw_rules"
+  } > "$FW_MAN"
+  backend="$FW_BACKEND"
+  if [ "$backend" = auto ]; then
+    if command -v ufw >/dev/null 2>&1; then backend=ufw
+    elif command -v firewall-cmd >/dev/null 2>&1; then backend=firewalld
+    else backend=iptables; fi
+  fi
+  echo "$backend" > /tmp/linuxmig-fw-backend
+  if [ "${USE_SYSTEMD:-0}" = 1 ]; then
+    case "$backend" in
+      ufw)
+        for p in ${FW_TCP:-}; do ufw allow "$p"/tcp >/dev/null 2>&1; done
+        for p in ${FW_UDP:-}; do ufw allow "$p"/udp >/dev/null 2>&1; done
+        [ "${FW_DEFAULT_INPUT:-}" = deny ] && ufw default deny incoming >/dev/null 2>&1
+        ufw --force enable >/dev/null 2>&1 ;;
+      firewalld)
+        systemctl start firewalld >/dev/null 2>&1
+        for p in ${FW_TCP:-}; do firewall-cmd --permanent --add-port="$p"/tcp >/dev/null 2>&1; done
+        for p in ${FW_UDP:-}; do firewall-cmd --permanent --add-port="$p"/udp >/dev/null 2>&1; done
+        firewall-cmd --reload >/dev/null 2>&1 ;;
+      iptables)
+        if [ -s "$PLAN_DIR/fw_rules" ]; then
+          iptables-restore < "$PLAN_DIR/fw_rules" >/dev/null 2>&1
+        else
+          for p in ${FW_TCP:-}; do iptables -A INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1; done
+          for p in ${FW_UDP:-}; do iptables -A INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1; done
+        fi ;;
+    esac
+    echo "[fw] applied via $backend (target)"
+  else
+    echo "[fw] container: structural only (no netfilter); backend=$backend manifest=$FW_MAN"
+  fi
+fi
+
+echo "apply done (PM=$PM, cron=${CRON_FILE:-})"

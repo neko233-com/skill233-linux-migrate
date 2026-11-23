@@ -1,0 +1,12 @@
+[Unit]
+Description=Business App (python http.server)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server 8080 --bind 0.0.0.0 --directory /server/web
+WorkingDirectory=/server/web
+Restart=on-failure
+User=appsvc
+
+[Install]
+WantedBy=multi-user.target

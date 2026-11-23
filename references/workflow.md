@@ -19,7 +19,9 @@ ssh root@源服务器 'bash -s' < scripts/snapshot.sh
 
 - `packages`：目标机器要确保存在的包（原样复刻时可直接放全量清单，再裁剪）。RHEL 9 minimal 装 `curl` 需 `--allowerasing`（脚本会自动重试）。
 - `files`：要落盘的配置（`src` 相对 plan/，`dest` 容器内路径，`contains` 必含文本）。
-- `dirs`：整棵业务目录树（如 `/server`），host 打 tar、容器解包，保结构保权限；`src_root` 可指向仓库外的真实副本。
+- `dirs`：整棵业务目录树（如 `/server`），host 打 tar、容器解包，保结构保权限；`owner`/`group` 递归属主，`attrs[]` 按相对路径逐文件还原 `mode`/`owner`/`group`（0600 密钥、0755 可执行）；`src_root` 可指向仓库外的真实副本。
+- `databases`（**可选/可后置**）：`type` ∈ postgresql/mysql/mariadb/redis，`dump` 为源机导出文件，`verify` 为恢复后校验查询。核心迁移可先不填，中间件单独 `--stages databases` 验证。
+- `firewall`：`backend` ∈ ufw/firewalld/iptables/auto，`allow_tcp`/`allow_udp` 放行端口，`rules` 原始规则；目标机真实应用，容器内结构级校验。
 - `units`：systemd unit 落盘；镜像有 `systemd-analyze` 做真实校验，否则结构校验。
 - `services`：真正启动业务进程并校验端口归属（`port` 必填才能验监听）。
 - `groups` / `users`：`users[].group` 为所属组。
@@ -28,15 +30,28 @@ ssh root@源服务器 'bash -s' < scripts/snapshot.sh
 - `checks`：容器内执行的校验命令，用于验证程序层（如 `nginx -T` 里能否看到你的 server 块、业务端口能否回包、glibc 版本是否够）。
 - `per_distro`：发行版专属覆盖，键名同 matrix.json（支持 `files/dirs/units/services/...` 全部列表键）。
 
-## 3. 跑矩阵
+## 3. 跑矩阵（Agent 可分阶段）
 
 ```bash
+python scripts/matrix.py reset --only ubuntu-noble
+# 核心：文件/权限/unit/cron（先不碰中间件）
+python scripts/matrix.py apply --only ubuntu-noble --plan <plan> --stages pkgs,files,dirs,users,attrs,units,cron
+python scripts/matrix.py verify --only ubuntu-noble --plan <plan>
+# 再起服务、应用防火墙
+python scripts/matrix.py apply --only ubuntu-noble --plan <plan> --stages services,firewall
+python scripts/matrix.py verify --only ubuntu-noble --plan <plan>
+# 中间件需要时单独跑
+python scripts/matrix.py apply --only ubuntu-noble --plan <plan> --stages databases
+
 python scripts/matrix.py all                 # 全部启用发行版
 python scripts/matrix.py all --only rocky-9,ubuntu-noble
 python scripts/matrix.py up                  # 只起容器
-python scripts/matrix.py reset               # 换 plan 前重置（down + up）
 python scripts/matrix.py down                # 清理
 ```
+
+`verify` 写 `out/<distro>.tsv`，`report` 写 `report/results.json`（每项 `{status,name,detail}`）。
+Agent 应读 FAIL 的 `detail` 改计划/脚本，然后**只重跑相关阶段**；核心绿后再全量矩阵。
+中间件未绿不阻塞核心迁移，可作为后续增量任务。
 
 > 换计划文件必须 `reset`：上一轮起的业务进程会占着端口，虽然 `svc:` 校验会识别「端口不是本进程持有」，
 > 但残留进程仍可能让后续服务起不来，干扰结论。
@@ -54,6 +69,9 @@ python scripts/matrix.py down                # 清理
   `not owned by pid` 说明端口被别的进程占着，先 `reset`；`not LISTEN` 说明进程活着但没绑上端口（配置/端口冲突）。
 - `check:glibc>=x:yyy` FAIL → 目标机 libc 低于产物要求，见 `business-stack.md`（换 OS / 编 musl / 容器化）。
 - `user/group` FAIL → 脚本未创建成功，检查 apply 阶段日志。
+- `fattr:/dirattr:/attr:` FAIL → 属主/权限未还原：确认 `users`/`groups` 已建、tar 保留源属性、attrs 路径相对 `dirs[].dest` 正确。
+- `db:xxx` FAIL → 看 detail：`query failed` 查 `/tmp/linuxmig-db.log`；连接失败多为守护未起来（容器无 systemd 用直控守护）；mariadb 需 `/run/mysqld` 与 `--pid-file`（脚本已处理）。
+- `fw:xxx` FAIL → 容器内只验清单；目标机查 active 状态，确认 backend 服务已启动。
 - `cron` FAIL → `/etc/cron.d/linuxmig` 未写入或表达式/命令缺失，检查 plan 中 cron 条目。
 
 报告全绿后，再把同一计划对照真实服务器检查清单过一遍。

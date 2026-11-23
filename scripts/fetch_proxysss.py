@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""fetch_proxysss.py — 从 neko233-com/proxysss 的 GitHub Release 拉取二进制，
+"""fetch_proxysss.py — （可选示例）从 neko233-com/proxysss 的 GitHub Release 拉取二进制，
 组装 /server 业务树（默认 out/proxysss-stack），供 examples/business、examples/prod 使用。
 
-proxysss 替代 nginx 作为业务网关。v1.3.15+ 为全静态 ELF，7 发行版（含 Alpine/musl）通用。
+proxysss 只是业务二进制的一个示例（默认拉 latest，当前 v1.3.18 全静态 ELF，7 发行版含 Alpine/musl 通用）。
+技能主线是「任意业务栈」迁移，不绑定 proxysss；通用业务示例见 examples/full-business。
 
-用法: python scripts/fetch_proxysss.py [--tag v1.3.15|latest] [--arch amd64|arm64] [--out out/proxysss-stack]
+用法: python scripts/fetch_proxysss.py [--tag v1.3.18|latest] [--arch amd64|arm64] [--out out/proxysss-stack]
 """
 import argparse
 import re
@@ -24,18 +25,16 @@ http:
   h3_bind: 0.0.0.0:8443
   tls:
     mode: self_signed
-    cert_path: certs/proxysss-cert.pem
-    key_path: certs/proxysss-key.pem
-    generate_self_signed_if_missing: true
     server_name: gateway.local
+    generate_self_signed_if_missing: true
 admin:
-  enabled: true
   bind: 127.0.0.1:7777
-  username: root
-  password: root
-monitoring:
-  enabled: true
-  path: /metrics
+  enable_write_ops: false
+  expose_config: false
+  monitor:
+    enabled: true
+    password: business-monitor-pass
+    hosts: []
 services:
   static_sites:
     - name: business
@@ -94,8 +93,8 @@ def main():
     size_mb = (stack / "proxysss").stat().st_size / 1048576
     print(f"已组装 {out}（{size_mb:.1f}MB, {kind}" + (f", glibc>={floor}" if floor else "") + "）")
     if kind == "dynamic" and floor:
-        print(f"警告：动态产物要求 glibc>={floor}，老发行版会起不来；建议用 v1.3.15+ 静态版。")
-    print("下一步: python scripts/matrix.py reset && python scripts/matrix.py all --plan examples/business/plan.json")
+        print(f"警告：动态产物要求 glibc>={floor}，老发行版会起不来；建议用 v1.3.18 静态版。")
+    print("下一步（可选示例）: python scripts/matrix.py reset && python scripts/matrix.py all --plan examples/business/plan.json")
 
 
 if __name__ == "__main__":

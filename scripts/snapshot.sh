@@ -58,6 +58,17 @@ else
   echo "no /server" | tee -a "$OUT_DIR/source.txt"
 fi
 
+# --- 业务目录属主/权限（迁移需原样还原，不再统一 0755）---
+echo "" | tee -a "$OUT_DIR/source.txt"
+echo "== BUSINESS ATTRS (/server) ==" | tee -a "$OUT_DIR/source.txt"
+if [ -d /server ]; then
+  printf '.|%s\n' "$(stat -c '%a|%U|%G' /server 2>/dev/null)" | tee -a "$OUT_DIR/source.txt"
+  find /server -type f 2>/dev/null | head -500 | while read -r f; do
+    rel=${f#/server/}
+    printf '%s|%s\n' "$rel" "$(stat -c '%a|%U|%G' "$f" 2>/dev/null)"
+  done | tee -a "$OUT_DIR/source.txt"
+fi
+
 # --- 业务二进制的 libc 下限（迁移最容易踩的坑）---
 echo "" | tee -a "$OUT_DIR/source.txt"
 echo "== BINARY LIBC REQUIREMENTS ==" | tee -a "$OUT_DIR/source.txt"
@@ -78,6 +89,17 @@ for u in /etc/systemd/system/*.service; do
   echo "-- $u" | tee -a "$OUT_DIR/source.txt"
   cat "$u" | tee -a "$OUT_DIR/source.txt"
 done
+
+# --- 数据库引擎探测（迁移需 dump→restore，不能只拷数据文件）---
+echo "" | tee -a "$OUT_DIR/source.txt"
+echo "== DATABASES ==" | tee -a "$OUT_DIR/source.txt"
+for eng in mysql mariadb psql redis-cli mongosh; do
+  command -v "$eng" >/dev/null 2>&1 && echo "client: $eng" | tee -a "$OUT_DIR/source.txt"
+done
+ps -eo comm,args 2>/dev/null | grep -E 'mysqld|mariadbd|postgres|redis-server|mongod' | grep -v grep | tee -a "$OUT_DIR/source.txt"
+mysql --version 2>/dev/null | tee -a "$OUT_DIR/source.txt"
+psql --version 2>/dev/null | tee -a "$OUT_DIR/source.txt"
+redis-server --version 2>/dev/null | tee -a "$OUT_DIR/source.txt"
 
 # --- 防火墙 ---
 echo "" | tee -a "$OUT_DIR/source.txt"

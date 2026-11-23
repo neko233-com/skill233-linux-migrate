@@ -190,4 +190,100 @@ while true; do
   i=$((i + 1))
 done
 
+# --- 属主/权限校验（stat %U/%G/%a，兼容 busybox）---
+verify_attrs() { # label path owner group mode
+  lbl="$1"; p="$2"; o="$3"; g="$4"; m="$5"
+  if [ ! -e "$p" ]; then fail "$lbl" "missing"; return; fi
+  s=$(stat -c '%U %G %a' "$p" 2>/dev/null)
+  set -- $s
+  cu="$1"; cg="$2"; cm="$3"
+  if [ -n "$o" ] && [ "$cu" != "$o" ]; then fail "$lbl" "owner=$cu want=$o"; return; fi
+  if [ -n "$g" ] && [ "$cg" != "$g" ]; then fail "$lbl" "group=$cg want=$g"; return; fi
+  if [ -n "$m" ]; then
+    want=$(printf '%s' "$m" | sed 's/^0*//'); [ -z "$want" ] && want=0
+    if [ "$cm" != "$want" ]; then fail "$lbl" "mode=$cm want=$m"; return; fi
+  fi
+  pass "$lbl" "owner=$cu group=$cg mode=$cm"
+}
+i=0
+while true; do
+  eval "dest=\${FILE${i}_DEST:-}"; [ -z "$dest" ] && break
+  eval "o=\${FILE${i}_OWNER:-}"; eval "g=\${FILE${i}_GROUP:-}"; eval "m=\${FILE${i}_MODE:-}"
+  if [ -n "$o" ] || [ -n "$g" ] || [ -n "$m" ]; then verify_attrs "fattr:$dest" "$dest" "$o" "$g" "$m"; fi
+  i=$((i + 1))
+done
+i=0
+while true; do
+  eval "dest=\${DIR${i}_DEST:-}"; [ -z "$dest" ] && break
+  eval "o=\${DIR${i}_OWNER:-}"; eval "g=\${DIR${i}_GROUP:-}"
+  if [ -n "$o" ] || [ -n "$g" ]; then verify_attrs "dirattr:$dest" "$dest" "$o" "$g" ""; fi
+  if [ -f "$PLAN_DIR/dirs/$i.attrs" ]; then
+    while IFS='|' read -r ap am ao ag; do
+      [ -z "$ap" ] && continue
+      verify_attrs "attr:$dest/$ap" "$dest/$ap" "$ao" "$ag" "$am"
+    done < "$PLAN_DIR/dirs/$i.attrs"
+  fi
+  i=$((i + 1))
+done
+
+# --- 数据库校验：连接恢复后的实例并跑校验查询 ---
+i=0
+while true; do
+  eval "dtype=\${DB${i}_TYPE:-}"; [ -z "$dtype" ] && break
+  eval "dname=\${DB${i}_NAME:-app}"; eval "dverify=\${DB${i}_VERIFY:-}"
+  case "$dtype" in
+    postgresql|postgres)
+      pgbin=$(cat /tmp/linuxmig-pgbin 2>/dev/null); port=$(cat /tmp/linuxmig-pgport 2>/dev/null || echo 5432)
+      q="${dverify:-SELECT 1}"
+      if su -s /bin/sh postgres -c "$pgbin/psql -h /tmp -p $port -d $dname -tAc \"$q\"" >/tmp/db-check.out 2>&1; then
+        pass "db:$dname" "postgresql ok: $(head -1 /tmp/db-check.out)"
+      else
+        fail "db:$dname" "postgresql query failed: $(tail -1 /tmp/db-check.out)"
+      fi ;;
+    mysql|mariadb)
+      cli=$(cat /tmp/linuxmig-mysql-client 2>/dev/null); sock=$(cat /tmp/linuxmig-mysql-sock 2>/dev/null)
+      q="${dverify:-SELECT 1}"
+      if "$cli" --socket="$sock" -D "$dname" -e "$q" >/tmp/db-check.out 2>&1; then
+        pass "db:$dname" "mariadb ok: $(head -1 /tmp/db-check.out)"
+      else
+        fail "db:$dname" "mariadb query failed: $(tail -1 /tmp/db-check.out)"
+      fi ;;
+    redis)
+      port=$(cat /tmp/linuxmig-redis-port 2>/dev/null || echo 6379)
+      if [ "$(redis-cli -p "$port" ping 2>/dev/null)" = PONG ]; then
+        if [ -n "$dverify" ]; then
+          if redis-cli -p "$port" $dverify >/tmp/db-check.out 2>&1; then
+            pass "db:$dname" "redis ok: $(head -1 /tmp/db-check.out)"
+          else
+            fail "db:$dname" "redis verify failed"
+          fi
+        else
+          pass "db:$dname" "redis PONG"
+        fi
+      else
+        fail "db:$dname" "redis not reachable"
+      fi ;;
+    *) fail "db:$dname" "unsupported type $dtype" ;;
+  esac
+  i=$((i + 1))
+done
+
+# --- 防火墙校验：目标机查真实状态；容器内查规则清单（结构级）---
+if [ -n "${FW_BACKEND:-}" ] && [ "${FW_BACKEND}" != none ]; then
+  backend=$(cat /tmp/linuxmig-fw-backend 2>/dev/null || echo "$FW_BACKEND")
+  if [ -d /run/systemd/system ]; then
+    ok=0
+    case "$backend" in
+      ufw) ufw status 2>/dev/null | grep -q "Status: active" && ok=1 ;;
+      firewalld) firewall-cmd --state >/dev/null 2>&1 && ok=1 ;;
+      iptables) iptables -S INPUT >/dev/null 2>&1 && ok=1 ;;
+    esac
+    if [ "$ok" = 1 ]; then pass "fw:$backend" "active on target"; else fail "fw:$backend" "not active on target"; fi
+  elif [ -f /tmp/linuxmig-firewall.manifest ]; then
+    pass "fw:$backend" "structural ok (container: no netfilter); $(grep -c '^allow' /tmp/linuxmig-firewall.manifest) allow rules"
+  else
+    fail "fw:$backend" "manifest missing"
+  fi
+fi
+
 echo "verify done -> $OUT"

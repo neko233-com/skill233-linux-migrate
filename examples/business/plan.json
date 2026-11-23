@@ -2,7 +2,11 @@
   "src_root": "out/proxysss-stack",
   "packages": ["curl"],
   "dirs": [
-    { "src": "server", "dest": "/server" }
+    { "src": "server", "dest": "/server",
+      "attrs": [
+        { "path": "proxysss/proxysss", "mode": "0755" },
+        { "path": "proxysss/proxysss.yaml", "mode": "0644" }
+      ] }
   ],
   "units": [
     { "src": "files/proxysss.service", "name": "proxysss.service", "dest": "/etc/systemd/system/proxysss.service" }

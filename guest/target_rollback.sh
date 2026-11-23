@@ -29,6 +29,15 @@ if [ -f "$PLAN_DIR/apply.env" ]; then
   done
 fi
 
+# 停 apply 直控启动的数据库守护进程
+if [ -f /tmp/linuxmig-pgbin ]; then
+  su -s /bin/sh postgres -c "$(cat /tmp/linuxmig-pgbin)/pg_ctl -D /var/lib/linuxmig-pg -m fast stop" 2>/dev/null
+fi
+if [ -f /tmp/linuxmig-mysql-sock ] && [ -f /tmp/linuxmig-mysql-client ]; then
+  "$(cat /tmp/linuxmig-mysql-client)" --socket="$(cat /tmp/linuxmig-mysql-sock)" -e "SHUTDOWN;" 2>/dev/null
+fi
+[ -f /tmp/linuxmig-redis-port ] && redis-cli -p "$(cat /tmp/linuxmig-redis-port)" shutdown nosave 2>/dev/null
+
 TAB=$(printf '\t')
 while IFS="$TAB" read -r t d rel; do
   [ -z "$t" ] && continue
@@ -57,5 +66,9 @@ done < "$MAN"
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+# 防火墙回滚（iptables 规则集 best-effort 恢复）
+if [ -f "$BK/firewall-iptables.rules" ] && command -v iptables-restore >/dev/null 2>&1; then
+  iptables-restore < "$BK/firewall-iptables.rules" 2>/dev/null
 fi
 echo "rollback done from $BK"

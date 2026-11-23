@@ -116,6 +116,7 @@ def main():
     ap.add_argument("--container", help="docker 容器名，如 lm-ubuntu-noble")
     ap.add_argument("--distro", help="per_distro 合并键（缺省自动识别目标机）")
     ap.add_argument("--rollback", action="store_true", help="恢复最近一次部署前的状态")
+    ap.add_argument("--stages", help="apply 阶段子集（透传 target_apply.sh），默认 all")
     args = ap.parse_args()
 
     if args.transport == "ssh":
@@ -154,10 +155,11 @@ def main():
     tr.upload(tar, REMOTE_TAR)
     tr.exec(f"rm -rf {REMOTE_DIR} && mkdir -p {REMOTE_DIR} && tar -xf {REMOTE_TAR} -C {REMOTE_DIR}")
 
-    r = tr.exec(f"sh {REMOTE_DIR}/guest/target_apply.sh {REMOTE_DIR}/plan")
+    stages = args.stages or "all"
+    r = tr.exec(f"env STAGES={stages} sh {REMOTE_DIR}/guest/target_apply.sh {REMOTE_DIR}/plan")
     print(r.stdout.strip())
 
-    tr.exec(f"sh {REMOTE_DIR}/guest/verify.sh {REMOTE_DIR}/plan {REMOTE_TSV}")
+    r = tr.exec(f"env STAGES={stages} sh {REMOTE_DIR}/guest/verify.sh {REMOTE_DIR}/plan {REMOTE_TSV}")
     tsv = tr.download_text(REMOTE_TSV)
     matrix.OUT.mkdir(exist_ok=True)
     (matrix.OUT / "target-verify.tsv").write_bytes(tsv.encode())

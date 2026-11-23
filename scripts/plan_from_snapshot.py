@@ -76,6 +76,27 @@ def main():
     if tree and not any("no /server" in l for l in tree):
         dirs.append({"src": "server", "dest": "/server"})
 
+    # --- 业务目录属主/权限：原样还原（不再统一 0755）---
+    attrs_section = sections.get("BUSINESS ATTRS (/server)", [])
+    if dirs and attrs_section:
+        owner = group = ""
+        attrs = []
+        for line in attrs_section:
+            parts = line.strip().split("|")
+            if len(parts) != 4:
+                continue
+            path, mode, u, g = parts
+            if path == ".":
+                owner, group = u, g
+                continue
+            attrs.append({"path": path, "mode": mode, "owner": u, "group": g})
+        if owner:
+            dirs[0]["owner"] = owner
+        if group:
+            dirs[0]["group"] = group
+        if attrs:
+            dirs[0]["attrs"] = attrs
+
     # --- 业务二进制的 glibc 下限：每个二进制生成一条兼容性 check ---
     checks = []
     libc_floor = ""
@@ -141,6 +162,44 @@ def main():
             cur_lines.append(s)
     flush_unit()
 
+    # --- 数据库：探测到的引擎生成 databases 骨架（dump 需人工从源机导出补入）---
+    databases = []
+    db_text = "\n".join(sections.get("DATABASES", [])).lower()
+    if "mariadb" in db_text or "mysql" in db_text:
+        databases.append({"type": "mariadb", "name": "appdb", "dump": "", "verify": "SELECT 1"})
+    if "psql" in db_text or "postgres" in db_text:
+        databases.append({"type": "postgresql", "name": "appdb", "dump": "", "verify": "SELECT 1"})
+    if "redis" in db_text:
+        databases.append({"type": "redis", "name": "cache", "dump": "", "verify": "PING"})
+
+    # --- 防火墙：解析 ufw / firewalld / iptables 放行规则 ---
+    fw_section = sections.get("FIREWALL", [])
+    fw_text = "\n".join(fw_section)
+    allow_tcp, allow_udp, rules = [], [], []
+    for m in re.finditer(r"(\d+)/(tcp|udp)", fw_text):
+        port = int(m.group(1))
+        (allow_tcp if m.group(2) == "tcp" else allow_udp).append(port)
+    for line in fw_section:
+        s = line.strip()
+        if s.startswith("-A INPUT"):
+            rules.append(s)
+    backend = ""
+    if re.search(r"Status:\s*active", fw_text) or "ufw" in fw_text.lower():
+        backend = "ufw"
+    elif "ports:" in fw_text or "firewall-cmd" in fw_text:
+        backend = "firewalld"
+    elif rules:
+        backend = "iptables"
+    firewall = {}
+    if allow_tcp or allow_udp or rules or backend:
+        firewall = {
+            "backend": backend or "auto",
+            "allow_tcp": sorted(set(allow_tcp)),
+            "allow_udp": sorted(set(allow_udp)),
+            "rules": rules,
+            "default_input": "deny" if "deny" in fw_text.lower() else "",
+        }
+
     plan = {
         "packages": packages,
         "files": [],
@@ -152,18 +211,23 @@ def main():
         "cron": cron,
         "commands": [],
         "checks": checks,
+        "databases": databases,
+        "firewall": firewall,
         "per_distro": {},
         "_note": ("由 plan_from_snapshot.py 生成；请人工补 files（配置文件）、commands，"
                   "给 services 补 port（监听端口）与 stop；dirs 的 src 需把源机 /server 拷到计划目录下"
-                  "（或设置 src_root 指向本地副本）"),
+                  "（或设置 src_root 指向本地副本）；databases 需补 dump 文件路径（源机 mysqldump/pg_dump/redis 导出），"
+                  "mongodb 需人工 mongodump/mongorestore；firewall 规则请人工复核"),
     }
     if libc_floor:
         plan["_libc_floor"] = libc_floor
 
     out = ROOT / args.out
     out.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    n_attrs = len(dirs[0].get("attrs", [])) if dirs else 0
     print(f"已写入 {out}：{len(packages)} 包 / {len(users)} 用户 / {len(cron)} cron / "
-          f"{len(dirs)} 目录树 / {len(units)} unit / {len(services)} 服务 / {len(checks)} 二进制兼容检查")
+          f"{len(dirs)} 目录树({n_attrs} 属主权限项) / {len(units)} unit / {len(services)} 服务 / "
+          f"{len(checks)} 二进制兼容检查 / {len(databases)} 数据库 / 防火墙{'有' if firewall else '无'}")
     if libc_floor:
         print(f"业务二进制最高要求 glibc {libc_floor}——目标机必须 >= 该版本，否则换静态产物（proxysss v1.3.15+ 已静态）或容器化。")
     print("提醒：配置文件、services 的 port/stop、防火墙规则需人工补充；packages 可按需要裁剪。")

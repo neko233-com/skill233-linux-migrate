@@ -44,6 +44,34 @@ def detect_compose():
     raise SystemExit("未找到 kiri 或 docker，请先启动容器引擎")
 
 
+# 可选镜像加速（仅 --mirror cn 显式开启）：把容器内包源换成 mirrors.aliyun.com。
+# 不改技能默认行为；适合国内网络访问 archive/deb/dl-cdn 过慢时使用。
+MIRROR_SCRIPT = r'''
+case "$DISTRO" in
+  ubuntu-*|debian-*)
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
+      [ -f "$f" ] || continue
+      sed -i -E 's#http(s)?://(archive|security|ports)\.ubuntu\.com#http\1://mirrors.aliyun.com#g; s#http(s)?://deb\.debian\.org#http\1://mirrors.aliyun.com#g' "$f"
+    done
+    apt-get update -y >/tmp/linuxmig-mirror.log 2>&1 || true ;;
+  alpine-*)
+    [ -f /etc/apk/repositories ] && sed -i 's|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.aliyun.com/alpine|g' /etc/apk/repositories
+    apk update >/tmp/linuxmig-mirror.log 2>&1 || true ;;
+  rocky-*|alma-*|centos-*)
+    for f in /etc/yum.repos.d/*.repo; do
+      [ -f "$f" ] || continue
+      sed -i -E 's|^mirrorlist=|#mirrorlist=|; s|https?://dl\.rockylinux\.org/\$contentdir|https://mirrors.aliyun.com/rocky|g; s|https?://repo\.almalinux\.org/almalinux|https://mirrors.aliyun.com/almalinux|g; s|https?://mirror\.stream\.centos\.org/9-stream|https://mirrors.aliyun.com/centos-stream/9-stream|g; s|^#baseurl=|baseurl=|' "$f"
+    done
+    dnf makecache >/tmp/linuxmig-mirror.log 2>&1 || true ;;
+esac
+'''
+
+
+def ensure_mirror(cname: str, distro: str):
+    run(["docker", "exec", "-e", f"DISTRO={distro}", cname, "sh", "-c", MIRROR_SCRIPT],
+        check=False, capture=True)
+
+
 def enabled_distros(matrix, only=None):
     out = []
     for d in matrix["distros"]:
@@ -100,20 +128,28 @@ def merge_plan(distro_name: str, plan: dict) -> dict:
         "cron": list(plan.get("cron", [])),
         "commands": list(plan.get("commands", [])),
         "checks": list(plan.get("checks", [])),
+        "databases": list(plan.get("databases", [])),
+        "firewall": dict(plan.get("firewall", {})),
     }
     ov = plan.get("per_distro", {}).get(distro_name, {})
     # packages：追加去重；其余列表：有覆盖则整体替换
     for p in ov.get("packages", []):
         if p not in merged["packages"]:
             merged["packages"].append(p)
-    for k in ("files", "dirs", "units", "services", "groups", "users", "cron", "commands", "checks"):
+    for k in ("files", "dirs", "units", "services", "groups", "users", "cron", "commands", "checks", "databases"):
         if k in ov:
             merged[k] = ov[k]
+    if "firewall" in ov:
+        merged["firewall"] = ov["firewall"]
     return merged
 
 
 def make_tar(src: Path, tar_path: Path):
-    """把 src 目录内容（保留相对结构）打成 tar；文件统一 0755 便于直接执行。"""
+    """把 src 目录内容（保留相对结构与源 mode/uid/gid）打成 tar。
+
+    不再强制 0755/root：属主/权限的最终权威来自计划的 owner/group/mode 与 dirs[].attrs
+    （apply 阶段 chown/chmod 还原），因为 Windows 宿主无法携带真实 Unix 属主。
+    """
     import tarfile
     tar_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(tar_path, "w") as tf:
@@ -121,9 +157,6 @@ def make_tar(src: Path, tar_path: Path):
             if not f.is_file():
                 continue
             ti = tf.gettarinfo(str(f), arcname=f.relative_to(src).as_posix())
-            ti.mode = 0o755
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = "root"
             with open(f, "rb") as fh:
                 tf.addfile(ti, fh)
 
@@ -147,14 +180,28 @@ def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR, dirs_
         (files_d / str(i)).write_bytes(src.read_bytes())
         env_lines.append(f'FILE{i}_DEST={shq(f["dest"])}')
         env_lines.append(f'FILE{i}_CONTAINS={shq(f.get("contains", ""))}')
+        env_lines.append(f'FILE{i}_OWNER={shq(f.get("owner", ""))}')
+        env_lines.append(f'FILE{i}_GROUP={shq(f.get("group", ""))}')
+        env_lines.append(f'FILE{i}_MODE={shq(str(f.get("mode", "")))}')
 
-    # 目录树：打成 tar，容器内解包（保留结构，文件 0755）；src_root 只影响 dirs
+    # 目录树：打成 tar，容器内解包（保留结构）；属主/权限由 owner/group + attrs 还原
+    (d / "dirs").mkdir(parents=True, exist_ok=True)
     for i, dd in enumerate(merged.get("dirs", [])):
         src = Path(dd["src"]) if Path(dd["src"]).is_absolute() else dirs_base / dd["src"]
         if not src.exists():
             raise SystemExit(f"dirs[{i}] 源目录不存在: {src}")
         make_tar(src, d / "dirs" / f"{i}.tar")
         env_lines.append(f'DIR{i}_DEST={shq(dd["dest"])}')
+        env_lines.append(f'DIR{i}_OWNER={shq(dd.get("owner", ""))}')
+        env_lines.append(f'DIR{i}_GROUP={shq(dd.get("group", ""))}')
+        attr_lines = []
+        for a in dd.get("attrs", []):
+            attr_lines.append("|".join([
+                a.get("path", ""), str(a.get("mode", "")),
+                a.get("owner", ""), a.get("group", ""),
+            ]))
+        (d / "dirs" / f"{i}.attrs").write_bytes(
+            ("\n".join(attr_lines) + ("\n" if attr_lines else "")).encode("utf-8"))
 
     # systemd unit 文件
     for i, u in enumerate(merged.get("units", [])):
@@ -178,6 +225,34 @@ def materialize(distro_name: str, merged: dict, base_dir: Path = PLAN_DIR, dirs_
     for i, c in enumerate(merged.get("checks", [])):
         env_lines.append(f'CHECK{i}_NAME={shq(c["name"])}')
         env_lines.append(f'CHECK{i}_CMD={shq(c["cmd"])}')
+
+    # 数据库：dump 落盘 + 类型/名称/校验/账号/包/端口（apply 按 type+PM 初始化并恢复）
+    for i, db in enumerate(merged.get("databases", [])):
+        dump_name = ""
+        if db.get("dump"):
+            dump_src = base_dir / db["dump"]
+            if not dump_src.exists():
+                raise SystemExit(f"databases[{i}] dump 不存在: {dump_src}")
+            dump_name = f"db{i}"
+            (files_d / dump_name).write_bytes(dump_src.read_bytes())
+        env_lines.append(f'DB{i}_TYPE={shq(db["type"])}')
+        env_lines.append(f'DB{i}_NAME={shq(db.get("name", "app"))}')
+        env_lines.append(f'DB{i}_DUMP={shq(dump_name)}')
+        env_lines.append(f'DB{i}_VERIFY={shq(db.get("verify", ""))}')
+        env_lines.append(f'DB{i}_USER={shq(db.get("user", ""))}')
+        env_lines.append(f'DB{i}_PASSWORD={shq(db.get("password", ""))}')
+        env_lines.append(f'DB{i}_PKGS={shq(" ".join(db.get("packages", [])))}')
+        env_lines.append(f'DB{i}_PORT={shq(str(db.get("port", "")))}')
+
+    # 防火墙：backend + 放行端口 + 默认入站策略 + 原始 iptables 规则
+    fw = merged.get("firewall", {})
+    env_lines.append(f'FW_BACKEND={shq(fw.get("backend", ""))}')
+    env_lines.append(f'FW_TCP={shq(" ".join(str(p) for p in fw.get("allow_tcp", [])))}')
+    env_lines.append(f'FW_UDP={shq(" ".join(str(p) for p in fw.get("allow_udp", [])))}')
+    env_lines.append(f'FW_DEFAULT_INPUT={shq(fw.get("default_input", ""))}')
+    fw_rules = fw.get("rules", [])
+    (d / "fw_rules").write_bytes(
+        ("\n".join(fw_rules) + ("\n" if fw_rules else "")).encode("utf-8"))
 
     # write_bytes 避免 Windows 下 \n 被翻译成 \r\n（容器内 sh 会吃到 \r）
     (d / "apply.env").write_bytes(("\n".join(env_lines) + "\n").encode("utf-8"))
@@ -246,10 +321,13 @@ def cmd_apply(args):
         merged = merge_plan(name, plan)
         mdir = materialize(name, merged, plan_base, dirs_base)
         cname = container_name(d)
+        if getattr(args, "mirror", "none") == "cn":
+            ensure_mirror(cname, name)
         run(["docker", "exec", cname, "rm", "-rf", f"/tmp/plan-{name}"], check=False)
         # mdir/. 复制目录内容到目标，避免 docker cp 把源目录套成子目录
         run(["docker", "cp", f"{mdir}/.", f"{cname}:/tmp/plan-{name}"], check=False)
-        r = run(["docker", "exec", cname, "sh", "/guest/apply.sh", f"/tmp/plan-{name}"], check=False, capture=True)
+        stage_env = ["-e", f"STAGES={args.stages}"] if getattr(args, "stages", None) else []
+        r = run(["docker", "exec", *stage_env, cname, "sh", "/guest/apply.sh", f"/tmp/plan-{name}"], check=False, capture=True)
         print(f"[apply] {name}: {r.stdout.strip() or r.stderr.strip()}")
 
 
@@ -356,6 +434,8 @@ def main():
         p.add_argument("--only", help="只跑指定发行版，逗号分隔")
         p.add_argument("--skip-pull", action="store_true")
         p.add_argument("--plan", help="使用指定计划文件（相对仓库根，默认 plan/migration.json）")
+        p.add_argument("--stages", help="apply 阶段子集，逗号分隔：pkgs,files,dirs,units,users,attrs,databases,services,cron,firewall；默认 all")
+        p.add_argument("--mirror", choices=["none", "cn"], default="none", help="容器内包源换成 mirrors.aliyun.com（国内网络加速，默认 none）")
     args = ap.parse_args()
     {"init": cmd_init, "up": cmd_up, "apply": cmd_apply, "verify": cmd_verify,
      "report": cmd_report, "down": cmd_down, "reset": cmd_reset, "all": cmd_all}[args.cmd](args)

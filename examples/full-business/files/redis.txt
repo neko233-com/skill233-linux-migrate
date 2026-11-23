@@ -1,0 +1,2 @@
+SET session:1 active
+SET session:2 active

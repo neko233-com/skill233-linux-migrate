@@ -7,6 +7,7 @@ set -u
 PLAN_DIR="$1"
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$PLAN_DIR/apply.env"
+STAGES="${STAGES:-all}"
 
 TS=$(date +%Y%m%d-%H%M%S)
 BK="/var/backups/linuxmig-$TS"
@@ -61,7 +62,15 @@ elif [ -d /etc/crontabs ] && [ ! -d /etc/cron.d ]; then CRON_FILE=/etc/crontabs/
 else CRON_FILE=/etc/cron.d/linuxmig; fi
 backup_path cron "$CRON_FILE"
 
-USE_SYSTEMD=1 sh "$HERE/apply.sh" "$PLAN_DIR"
+# 防火墙状态备份（回滚用）
+if command -v ufw >/dev/null 2>&1; then
+  ufw status verbose > "$BK/firewall-ufw.txt" 2>/dev/null
+elif command -v firewall-cmd >/dev/null 2>&1; then
+  firewall-cmd --list-all > "$BK/firewall-firewalld.txt" 2>/dev/null
+fi
+command -v iptables-save >/dev/null 2>&1 && iptables-save > "$BK/firewall-iptables.rules" 2>/dev/null
+
+USE_SYSTEMD=1 STAGES="$STAGES" sh "$HERE/apply.sh" "$PLAN_DIR"
 rc=$?
 echo "$BK" > /tmp/linuxmig-last-backup
 echo "target apply done (rc=$rc); backup=$BK"
